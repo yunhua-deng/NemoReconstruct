@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+import enum
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class ReconstructionStatus(str, enum.Enum):
+    uploading = "uploading"
+    queued = "queued"
+    extracting_frames = "extracting_frames"
+    feature_extraction = "feature_extraction"
+    feature_matching = "feature_matching"
+    sparse_reconstruction = "sparse_reconstruction"
+    fvdb_reconstruction = "fvdb_reconstruction"
+    exporting = "exporting"
+    completed = "completed"
+    failed = "failed"
+
+
+class Reconstruction(Base):
+    __tablename__ = "reconstructions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(64), default=ReconstructionStatus.uploading.value, nullable=False)
+    pipeline_slug: Mapped[str] = mapped_column(String(64), default="fvdb-isaac-sim-mvp", nullable=False)
+
+    processing_step: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    processing_pct: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processing_params_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    source_video_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_video_path: Mapped[str] = mapped_column(Text, nullable=False)
+    workspace_dir: Mapped[str] = mapped_column(Text, nullable=False)
+
+    frame_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    artifact_ply_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artifact_usdz_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artifact_bundle_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artifact_log_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artifact_metadata_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

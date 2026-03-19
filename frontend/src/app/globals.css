@@ -1,0 +1,319 @@
+:root {
+  color-scheme: light;
+  --bg: #f3efe5;
+  --surface: rgba(255, 252, 245, 0.82);
+  --surface-strong: rgba(255, 249, 236, 0.96);
+  --ink: #161312;
+  --muted: #60554d;
+  --line: rgba(80, 60, 37, 0.18);
+  --accent: #b84c23;
+  --accent-strong: #8d3415;
+  --good: #2f7d4d;
+  --warn: #c6921f;
+  --bad: #a5382a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background:
+    radial-gradient(circle at top left, rgba(239, 193, 133, 0.4), transparent 28%),
+    radial-gradient(circle at 85% 10%, rgba(184, 76, 35, 0.18), transparent 22%),
+    linear-gradient(180deg, #f8f2e4 0%, #efe8db 46%, #e9dfd2 100%);
+  color: var(--ink);
+  font-family: Georgia, "Times New Roman", serif;
+}
+
+a {
+  color: inherit;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+.page-shell {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 48px 20px 64px;
+}
+
+.hero-card,
+.upload-card,
+.status-card,
+.table-card {
+  backdrop-filter: blur(16px);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 28px;
+  box-shadow: 0 18px 48px rgba(56, 35, 20, 0.08);
+}
+
+.hero-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(320px, 0.9fr);
+  gap: 24px;
+  padding: 32px;
+  margin-bottom: 24px;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 0.75rem;
+  color: var(--accent-strong);
+}
+
+.hero-card h1,
+.upload-card h2,
+.status-card h2,
+.table-card h2 {
+  margin: 0;
+  line-height: 1;
+  font-weight: 700;
+}
+
+.hero-card h1 {
+  font-size: clamp(2.8rem, 5vw, 5rem);
+  max-width: 11ch;
+}
+
+.hero-copy {
+  max-width: 64ch;
+  color: var(--muted);
+  font-size: 1.05rem;
+  line-height: 1.6;
+}
+
+.pipeline-panel {
+  padding: 24px;
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(255, 245, 228, 0.96), rgba(250, 236, 216, 0.82));
+  border: 1px solid rgba(184, 76, 35, 0.16);
+}
+
+.pipeline-panel h2 {
+  margin-bottom: 12px;
+  font-size: 1.2rem;
+}
+
+.pipeline-name {
+  margin: 0 0 8px;
+  font-weight: 700;
+}
+
+.step-list {
+  padding-left: 18px;
+  margin: 16px 0 0;
+  color: var(--muted);
+}
+
+.grid-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.upload-card,
+.status-card,
+.table-card {
+  padding: 24px;
+}
+
+.upload-card form,
+.upload-card {
+  display: grid;
+  gap: 16px;
+}
+
+.upload-card label {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+}
+
+.upload-card input,
+.upload-card textarea,
+.status-card a,
+.table-card button,
+.upload-card button {
+  border-radius: 16px;
+}
+
+.upload-card input,
+.upload-card textarea {
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid rgba(90, 61, 40, 0.16);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.upload-card button,
+.table-card button,
+.status-card a {
+  appearance: none;
+  border: 0;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: white;
+  padding: 12px 18px;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.table-card button.ghost {
+  background: rgba(22, 19, 18, 0.08);
+  color: var(--ink);
+}
+
+.selected-file,
+.status-note,
+.subtle-line {
+  color: var(--muted);
+}
+
+.progress-track {
+  width: 100%;
+  height: 10px;
+  background: rgba(90, 61, 40, 0.12);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #cf7c32, #b84c23);
+}
+
+.progress-block,
+.mini-progress {
+  display: grid;
+  gap: 8px;
+}
+
+.table-headline {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.table-headline p {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 920px;
+}
+
+th,
+td {
+  padding: 14px 10px;
+  border-top: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+thead th {
+  border-top: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.artifact-links,
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.artifact-links a {
+  text-decoration: none;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(184, 76, 35, 0.1);
+  color: var(--accent-strong);
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 0.88rem;
+  text-transform: capitalize;
+}
+
+.status-completed {
+  background: rgba(47, 125, 77, 0.14);
+  color: var(--good);
+}
+
+.status-failed {
+  background: rgba(165, 56, 42, 0.12);
+  color: var(--bad);
+}
+
+.status-queued,
+.status-uploading,
+.status-extracting_frames,
+.status-feature_extraction,
+.status-feature_matching,
+.status-sparse_reconstruction,
+.status-fvdb_reconstruction,
+.status-exporting {
+  background: rgba(198, 146, 31, 0.14);
+  color: var(--warn);
+}
+
+.error-text,
+.error-inline {
+  color: var(--bad);
+}
+
+.empty-cell {
+  text-align: center;
+  color: var(--muted);
+  padding: 32px;
+}
+
+@media (max-width: 960px) {
+  .hero-card,
+  .grid-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .page-shell {
+    padding: 24px 14px 48px;
+  }
+
+  .hero-card h1 {
+    max-width: none;
+    font-size: clamp(2.4rem, 12vw, 3.6rem);
+  }
+}
