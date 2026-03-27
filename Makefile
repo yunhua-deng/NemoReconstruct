@@ -6,7 +6,7 @@ backend-install:
 	cd backend && $(PYTHON) -m pip install -r requirements.txt
 
 backend-dev:
-	cd backend && uvicorn app.main:app --reload
+	cd backend && $(PYTHON) -m uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
 
 frontend-install:
 	cd frontend && npm install

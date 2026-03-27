@@ -1,0 +1,102 @@
+# OpenShell Sandbox Network Policy — Template
+#
+# Copy this file and customize for your project:
+#   cp sandbox-policy-template.yaml sandbox-policy.yaml
+#
+# Find your host IP:
+#   docker network inspect openshell-cluster-openshell | grep Gateway
+#   (Typically 172.20.0.1)
+#
+# Usage:
+#   openshell sandbox create --policy sandbox-policy.yaml ...
+
+version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /usr
+    - /lib
+    - /proc
+    - /dev/urandom
+    - /app
+    - /etc
+    - /var/log
+  read_write:
+    - /sandbox
+    - /tmp
+    - /dev/null
+
+landlock:
+  compatibility: best_effort
+
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+  # ── YOUR SERVICE ──────────────────────────────────────
+  # Change the port to match your service.
+  # Add more entries if your project has multiple services.
+  my_service:
+    name: my-service
+    endpoints:
+      - host: 172.20.0.1        # Host IP (from docker network inspect)
+        port: 8010               # ← CHANGE THIS to your service port
+        protocol: tcp
+        enforcement: enforce
+        access: full
+    binaries:
+      - path: /usr/bin/curl
+      - path: /usr/bin/node
+      - path: /bin/bash
+
+  # ── OPENCLAW GATEWAY (required) ──────────────────────
+  # Do not remove — needed for agent communication.
+  openclaw_gateway:
+    name: openclaw-gateway
+    endpoints:
+      - host: 172.20.0.1
+        port: 18789
+        protocol: tcp
+        enforcement: enforce
+        access: full
+    binaries:
+      - path: /usr/bin/node
+      - path: /bin/bash
+
+  # ── GITHUB (optional) ────────────────────────────────
+  # Remove if git access is not needed.
+  github:
+    name: github
+    endpoints:
+      - host: github.com
+        port: 443
+        protocol: rest
+        tls: terminate
+        enforcement: enforce
+        rules:
+          - allow:
+              method: GET
+              path: /**/info/refs*
+          - allow:
+              method: POST
+              path: /**/git-upload-pack
+    binaries:
+      - path: /usr/bin/git
+
+  github_rest_api:
+    name: github-rest-api
+    endpoints:
+      - host: api.github.com
+        port: 443
+        protocol: rest
+        tls: terminate
+        enforcement: enforce
+        rules:
+          - allow:
+              method: GET
+              path: /**
+          - allow:
+              method: HEAD
+              path: /**

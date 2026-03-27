@@ -1,216 +1,235 @@
 # NemoReconstruct
 
-NemoReconstruct is a minimal end-to-end 3D reconstruction MVP for hackathon use.
-It accepts a `.MOV` upload, runs a simplified video-to-fVDB workflow, exposes a clean FastAPI backend with OpenAPI docs at `/docs`, ships a lightweight Next.js frontend, and includes Python and TypeScript SDKs for agents.
+A minimal 3D reconstruction pipeline designed as a **NemoClaw + OpenShell demo** — upload a video, get a Gaussian Splat PLY, all controlled by an AI agent running inside an isolated sandbox with local inference.
 
-## What It Does
+> **This repo is a template.** The [setup guide](docs/NEMOCLAW_SETUP.md) shows how to pair NemoClaw + OpenShell with **any** repo or API — NemoReconstruct is just the example project.
 
-- Upload a `.MOV` file through the backend or frontend
-- Extract frames with `ffmpeg`
-- Recover camera poses with `COLMAP`
-- Run `frgs reconstruct` from NVIDIA fVDB Reality Capture
-- Produce a demo-ready PLY splat output quickly (splat-only mode by default)
-- Expose a reproducible API surface with OpenAPI and SDKs
-
-## Architecture
-
-- `backend/`: FastAPI API, SQLite job store, single-worker background runner
-- `frontend/`: Next.js upload dashboard for uploading and monitoring reconstructions
-- `sdk/python/`: Python client for agents and automation
-- `sdk/typescript/`: TypeScript client matching the backend endpoints
-- `docs/openapi.json`: exported OpenAPI schema
-
-## Backend Endpoints
-
-- `GET /health`
-- `GET /api/v1/pipelines`
-- `POST /api/v1/reconstructions/upload`
-- `GET /api/v1/reconstructions`
-- `GET /api/v1/reconstructions/{id}`
-- `GET /api/v1/reconstructions/{id}/status`
-- `GET /api/v1/reconstructions/{id}/artifacts`
-- `GET /api/v1/reconstructions/{id}/download/{artifact}`
-- `POST /api/v1/reconstructions/{id}/retry`
-- `DELETE /api/v1/reconstructions/{id}`
-- `GET /docs`
-- `GET /openapi.json`
-
-## Demo URLs (Current Setup)
-
-- Frontend dashboard: `http://127.0.0.1:3000`
-- Backend API: `http://127.0.0.1:8010`
-- Backend docs: `http://127.0.0.1:8010/docs`
-- OpenAPI JSON: `http://127.0.0.1:8010/openapi.json`
-
-## How To Download Results
-
-After a run completes, get artifact URLs:
-
-```bash
-curl -s http://127.0.0.1:8010/api/v1/reconstructions/<id>/artifacts
+```
+Video → ffmpeg → COLMAP → fVDB/frgs → PLY
+                    ↑ controlled by ↑
+              NemoClaw Agent (OpenClaw)
+              inside OpenShell Sandbox
+              powered by Ollama (local LLM)
 ```
 
-Download the splat PLY:
-
-```bash
-curl -L -o output.ply \
-	http://127.0.0.1:8010/api/v1/reconstructions/<id>/download/splat_ply
-```
-
-Download run log and metadata:
-
-```bash
-curl -L -o run.log \
-	http://127.0.0.1:8010/api/v1/reconstructions/<id>/download/run_log
-
-curl -L -o metadata.json \
-	http://127.0.0.1:8010/api/v1/reconstructions/<id>/download/metadata
-```
-
-The latest demo run in this session was:
-
-- Reconstruction ID: `2c04ca28-3d20-4222-b91a-f75e0a8f3519`
-- PLY URL: `http://127.0.0.1:8010/api/v1/reconstructions/2c04ca28-3d20-4222-b91a-f75e0a8f3519/download/splat_ply`
-
-## System Requirements
-
-These tools are expected to be installed on the machine running the backend:
-
-- `ffmpeg`
-- `colmap`
-- `frgs` from NVIDIA fVDB Reality Capture
-
-If any dependency is missing, the backend will fail the job with a clear error message in the reconstruction status.
+---
 
 ## Quick Start
 
-See [Quickstart](#quickstart-1) at the bottom for the exact commands.
-
-## Agent-Tunable Reconstruction Params
-
-Your agent can tune each run by passing these optional fields to `POST /api/v1/reconstructions/upload`:
-
-- `frame_rate` (float, 0.25-12.0)
-- `sequential_matcher_overlap` (int, 2-50)
-- `fvdb_max_epochs` (int, 5-500)
-- `fvdb_sh_degree` (int, 0-4)
-- `fvdb_image_downsample_factor` (int, 1-12)
-- `splat_only_mode` (bool)
-
-These params are persisted per reconstruction and returned in API responses as `processing_params`.
-
-### Upload With Params (curl)
+> **Prerequisites:** Linux + NVIDIA GPU, Docker, Python 3.10+, Node.js 18+.
+> See [the full tutorial](docs/NEMOCLAW_SETUP.md) for step-by-step install of every prerequisite.
 
 ```bash
-curl -s -X POST http://127.0.0.1:8010/api/v1/reconstructions/upload \
-	-F "file=@/path/to/video.MOV" \
-	-F "name=iter-01" \
-	-F "description=agent tuning run" \
-	-F "frame_rate=2.0" \
-	-F "sequential_matcher_overlap=12" \
-	-F "fvdb_max_epochs=40" \
-	-F "fvdb_sh_degree=3" \
-	-F "fvdb_image_downsample_factor=6" \
-	-F "splat_only_mode=true"
+# 1. Start the backend (leave running)
+cd ~/NemoReconstruct && make backend-dev
+
+# 2. One-time OpenShell + Ollama setup (see full guide for details)
+openshell gateway start --gpu
+openshell provider create --name ollama --type openai \
+  --credential OPENAI_API_KEY=empty \
+  --config OPENAI_BASE_URL=http://host.openshell.internal:11434/v1
+openshell inference set --provider ollama --model glm-4.7-flash
+
+# 3. Run the agent in a sandbox
+openshell sandbox create \
+  --from openclaw \
+  --policy nemoclaw/sandbox-policy.yaml \
+  --upload "$PWD:/sandbox/NemoReconstruct" \
+  -- bash -c '
+mkdir -p /sandbox/.openclaw
+cp /sandbox/NemoReconstruct/nemoclaw/sandbox-openclaw.json /sandbox/.openclaw/openclaw.json
+export OPENAI_API_KEY=unused
+cd /sandbox/NemoReconstruct
+openclaw agent --local --session-id demo \
+  --message "List all reconstruction jobs. Use curl to call the API at http://172.20.0.1:8010" \
+  --json --timeout 120
+'
 ```
 
-### Retry Existing Run With New Params
+**Full tutorial:** [docs/NEMOCLAW_SETUP.md](docs/NEMOCLAW_SETUP.md) — covers every step from a fresh machine, and shows how to adapt this for your own project.
 
+---
+
+## What the Agent Can Do
+
+- Upload videos and start reconstruction jobs
+- Tune parameters (frame rate, epochs, downsample factor, quality presets)
+- Monitor progress in real time
+- Download PLY splat outputs
+- Retry failed jobs with adjusted settings
+- Inspect logs and system state via shell
+
+---
+
+## Project Structure
+
+```
+backend/          FastAPI API, SQLite job store, background runner
+frontend/         Next.js upload dashboard
+sdk/python/       Python client for agents and automation
+sdk/typescript/   TypeScript client
+nemoclaw/         Agent config, system prompt, sandbox policy, example scripts
+docs/             OpenAPI schema, setup guide
+```
+
+### NemoClaw Config Files
+
+| File | Purpose |
+|------|---------|
+| `nemoclaw/sandbox-policy.yaml` | OpenShell sandbox network policy (NemoReconstruct) |
+| `nemoclaw/sandbox-policy-template.yaml` | Generic sandbox policy — copy and customize for your project |
+| `nemoclaw/sandbox-openclaw.json` | OpenClaw config (NemoReconstruct → `inference.local`) |
+| `nemoclaw/sandbox-openclaw-template.json` | Generic OpenClaw config — copy and customize for your project |
+| `nemoclaw/nemoclaw_config.yaml` | Agent tools, model, guardrails |
+| `nemoclaw/system_prompt.md` | Agent persona and workflow rules |
+| `nemoclaw/example_session.py` | SDK script to test the pipeline without an agent |
+
+---
+
+## Backend API
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check |
+| GET | `/api/v1/pipelines` | List available pipelines |
+| POST | `/api/v1/reconstructions/upload` | Upload video + start reconstruction |
+| GET | `/api/v1/reconstructions` | List all jobs |
+| GET | `/api/v1/reconstructions/{id}` | Job details |
+| GET | `/api/v1/reconstructions/{id}/status` | Poll status + progress |
+| GET | `/api/v1/reconstructions/{id}/artifacts` | List downloadable artifacts |
+| GET | `/api/v1/reconstructions/{id}/download/{artifact}` | Download artifact |
+| POST | `/api/v1/reconstructions/{id}/retry` | Retry with new params |
+| DELETE | `/api/v1/reconstructions/{id}` | Delete a job |
+| GET | `/docs` | Interactive API docs |
+| GET | `/openapi.json` | OpenAPI schema |
+
+### Tunable Parameters
+
+Pass these to `POST /api/v1/reconstructions/upload`:
+
+| Parameter | Range | Default | Effect |
+|-----------|-------|---------|--------|
+| `frame_rate` | 0.25 – 12.0 | 2.0 | Frames/sec extracted by ffmpeg |
+| `sequential_matcher_overlap` | 2 – 50 | 12 | COLMAP matcher overlap |
+| `fvdb_max_epochs` | 5 – 500 | 40 | fVDB training epochs |
+| `fvdb_sh_degree` | 0 – 4 | 3 | Spherical harmonics degree |
+| `fvdb_image_downsample_factor` | 1 – 12 | 6 | Input image downsampling |
+| `splat_only_mode` | true/false | true | Skip USDZ, produce PLY only |
+
+---
+
+## Manual Usage (Without Agent)
+
+### Upload a video
 ```bash
-curl -s -X POST http://127.0.0.1:8010/api/v1/reconstructions/<id>/retry \
-	-H "Content-Type: application/json" \
-	-d '{
-		"params": {
-			"fvdb_max_epochs": 60,
-			"fvdb_image_downsample_factor": 4,
-			"frame_rate": 3.0
-		}
-	}'
+curl -s -X POST http://localhost:8010/api/v1/reconstructions/upload \
+  -F "file=@/path/to/video.MOV" \
+  -F "name=my-scene" \
+  -F "frame_rate=2.0" \
+  -F "fvdb_max_epochs=40"
 ```
 
-### 3. Export OpenAPI
-
+### Poll status
 ```bash
-cd backend
-python export_openapi.py
+curl -s http://localhost:8010/api/v1/reconstructions/<id>/status
 ```
 
-This writes `../docs/openapi.json`.
+### Download the PLY
+```bash
+curl -L -o output.ply \
+  http://localhost:8010/api/v1/reconstructions/<id>/download/splat_ply
+```
 
-## Agent Workflow Example
-
+### Python SDK
 ```python
 from nemo_reconstruct_client import NemoReconstructClient
 
-client = NemoReconstructClient("http://127.0.0.1:8010")
-job = client.upload_video(
-	"/tmp/scene.mov",
-	name="warehouse-walkthrough",
-	params={
-		"fvdb_max_epochs": 40,
-		"fvdb_image_downsample_factor": 6,
-		"splat_only_mode": True,
-	},
-)
+client = NemoReconstructClient("http://localhost:8010")
+job = client.upload_video("/tmp/scene.mov", "my-scene",
+    params={"fvdb_max_epochs": 40, "splat_only_mode": True})
 result = client.wait_for_completion(job.id)
-print(result.status)
 print(client.get_artifacts(job.id))
 ```
 
+---
+
+## Development
+
+```bash
+# Backend
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r backend/requirements.txt
+make backend-dev                # Starts on 0.0.0.0:8010
+
+# Frontend (optional)
+cd frontend && npm install
+make frontend-dev               # Starts on localhost:3000
+
+# Export OpenAPI schema
+make openapi
+
+# Install Python SDK
+pip install -e sdk/python
+```
+
+### System Requirements
+
+Pipeline binaries (must be on PATH or configured):
+- `ffmpeg`
+- `colmap`
+- `frgs` from NVIDIA fVDB Reality Capture (typically at `~/miniconda3/envs/fvdb/bin/frgs`)
+
+---
+
+## How It All Fits Together
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  DGX Spark                                                      │
+│                                                                  │
+│  ┌──────────────────────── OpenShell Sandbox ──────────────────┐ │
+│  │                                                              │ │
+│  │  OpenClaw Agent ──► inference.local ──► Gateway ──► Ollama  │ │
+│  │       │                                           :11434    │ │
+│  │       │ curl / OpenAPI tools                                 │ │
+│  │       ▼                                                      │ │
+│  │  NemoReconstruct API (:8010)                                │ │
+│  │       │                                                      │ │
+│  │       ▼                                                      │ │
+│  │  ffmpeg → COLMAP → fVDB/frgs → PLY splat                   │ │
+│  └──────────────────────────────────────────────────────────────┘ │
+│                                    │                             │
+│                                    ▼                             │
+│                             NVIDIA GPU (Blackwell)               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+| Component | Port | Purpose |
+|-----------|------|---------|
+| Ollama | 11434 | Local LLM (glm-4.7-flash) |
+| OpenShell Gateway | 8080 | Sandbox management + inference routing |
+| NemoReconstruct Backend | 8010 | FastAPI pipeline server |
+| NemoReconstruct Frontend | 3000 | Next.js dashboard (optional) |
+| `inference.local` | — | In-sandbox LLM endpoint → Ollama |
+
+---
+
+## Using This as a Template for Your Own Project
+
+The [full tutorial](docs/NEMOCLAW_SETUP.md) has a dedicated section (Part 2) that walks through connecting NemoClaw to **any** project:
+
+1. **Start your service** on `0.0.0.0` (not `127.0.0.1`)
+2. **Create a sandbox policy** — allow the sandbox to reach your service's port
+3. **Create an OpenClaw config** — point the agent at your workspace
+4. **Run the agent** — same `openshell sandbox create` pattern, just swap the paths
+
+The NemoClaw + OpenShell infrastructure (Ollama, gateway, provider, inference routing) is set up once and reused across all projects.
+
+---
+
 ## Notes
 
-- This is intentionally an MVP: one hardcoded pipeline, one local runner, local disk storage, and SQLite.
-- The pipeline shape mirrors Magic Mirror, but strips out Celery, Redis, MinIO, and Postgres to keep setup small.
-- The workflow is suitable for hackathon iteration and agent orchestration, not high-availability production use.
-
-## Quickstart
-
-Run these commands in order. Open two terminals — one for the backend, one for the frontend.
-
-### Terminal 1 — Backend
-
-```bash
-cd /home/clayton_littlejohn/devl/github/NemoReconstruct/backend
-source /home/clayton_littlejohn/devl/github/magic-mirror/.venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --host 127.0.0.1 --port 8010 --reload
-```
-
-Backend API: `http://127.0.0.1:8010`  
-Interactive docs: `http://127.0.0.1:8010/docs`
-
-### Terminal 2 — Frontend
-
-```bash
-cd /home/clayton_littlejohn/devl/github/NemoReconstruct/frontend
-cp .env.example .env.local
-npm install
-npm run dev
-```
-
-Frontend dashboard: `http://127.0.0.1:3000`
-
-### Upload a video
-
-```bash
-curl -s -X POST http://127.0.0.1:8010/api/v1/reconstructions/upload \
-  -F "file=@/path/to/video.MOV" \
-  -F "name=my-first-run"
-# returns {"id": "<job-id>", ...}
-```
-
-Poll until `status` is `completed`:
-
-```bash
-curl -s http://127.0.0.1:8010/api/v1/reconstructions/<id>/status
-```
-
-### Download the PLY splat
-
-```bash
-curl -L -o output.ply \
-  http://127.0.0.1:8010/api/v1/reconstructions/<id>/download/splat_ply
-```
-
-Open `output.ply` in [SuperSplat](https://playcanvas.com/supersplat/editor) or [antimatter15/splat](https://antimatter15.com/splat/) by dragging the file onto the page.
+- Intentionally an MVP: one pipeline, one worker, SQLite, local disk.
+- Designed for agent demos and livestream walkthroughs — not HA production.
+- The pattern (API + OpenShell sandbox + local inference) generalizes to any tool or SDK.
 
