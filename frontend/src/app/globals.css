@@ -364,6 +364,72 @@ thead th {
   color: white !important;
 }
 
+/* Simulation-ready asset download cards */
+.sim-assets {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sim-asset-btn {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+  border-radius: 14px;
+  text-decoration: none;
+  color: var(--fg);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  transition: border-color 0.15s, box-shadow 0.15s;
+  cursor: pointer;
+}
+
+.sim-asset-btn:hover {
+  border-color: var(--accent);
+  box-shadow: 0 4px 16px rgba(184, 76, 35, 0.12);
+}
+
+.sim-asset-icon {
+  font-size: 1.6rem;
+  flex-shrink: 0;
+}
+
+.sim-asset-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.sim-asset-name {
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.sim-asset-desc {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.sim-asset-dl {
+  font-size: 1.2rem;
+  color: var(--accent-strong);
+  flex-shrink: 0;
+}
+
+.sim-asset-usdz {
+  border-left: 3px solid var(--accent-strong);
+}
+
+.sim-asset-collision {
+  border-left: 3px solid var(--good);
+}
+
+.sim-asset-ply {
+  border-left: 3px solid var(--warn);
+}
+
 /* Workflow section */
 .wf-section {
   backdrop-filter: blur(16px);
@@ -647,6 +713,14 @@ thead th {
 }
 
 /* Detail text below pipeline */
+.wf-thresholds {
+  display: flex;
+  gap: 12px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  padding: 2px 0 0;
+}
+
 .wf-detail {
   font-size: 0.88rem;
   color: var(--muted);

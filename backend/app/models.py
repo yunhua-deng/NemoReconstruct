@@ -22,7 +22,9 @@ class ReconstructionStatus(str, enum.Enum):
     feature_matching = "feature_matching"
     sparse_reconstruction = "sparse_reconstruction"
     fvdb_reconstruction = "fvdb_reconstruction"
+    grut_reconstruction = "grut_reconstruction"
     exporting = "exporting"
+    generating_collision_mesh = "generating_collision_mesh"
     completed = "completed"
     failed = "failed"
 
@@ -34,7 +36,7 @@ class Reconstruction(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(64), default=ReconstructionStatus.uploading.value, nullable=False)
-    pipeline_slug: Mapped[str] = mapped_column(String(64), default="fvdb-isaac-sim-mvp", nullable=False)
+    pipeline_slug: Mapped[str] = mapped_column(String(64), default="nemo-reconstruct-mvp", nullable=False)
 
     processing_step: Mapped[str | None] = mapped_column(String(128), nullable=True)
     processing_pct: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -49,6 +51,7 @@ class Reconstruction(Base):
     artifact_ply_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     artifact_usdz_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     artifact_bundle_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artifact_collision_mesh_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     artifact_log_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     artifact_metadata_path: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -70,6 +73,8 @@ class Workflow(Base):
     current_step: Mapped[str | None] = mapped_column(String(128), nullable=True)
     iteration: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     max_iterations: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    accept_psnr_threshold: Mapped[float] = mapped_column(Float, default=25.0, nullable=False)
+    accept_ssim_threshold: Mapped[float] = mapped_column(Float, default=0.85, nullable=False)
     last_verdict: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     reconstruction_id: Mapped[str | None] = mapped_column(String(36), nullable=True)

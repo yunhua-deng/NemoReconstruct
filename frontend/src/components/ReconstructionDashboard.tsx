@@ -81,6 +81,11 @@ function WorkflowPipeline({ workflow, onStop, onDelete }: { workflow: WorkflowDe
         </div>
       </div>
 
+      <div className="wf-thresholds">
+        <span>PSNR ≥ {workflow.accept_psnr_threshold}</span>
+        <span>SSIM ≥ {workflow.accept_ssim_threshold}</span>
+      </div>
+
       <div className="wf-pipeline">
         {WORKFLOW_STEPS.map((step, idx) => {
           let cls = "wf-step";
@@ -123,6 +128,8 @@ function WorkflowStarter({ onStarted }: { onStarted: () => void }) {
   const [file, setFile] = useState<File | null>(null);
   const [sceneName, setSceneName] = useState("");
   const [maxIter, setMaxIter] = useState(3);
+  const [psnrThreshold, setPsnrThreshold] = useState(25.0);
+  const [ssimThreshold, setSsimThreshold] = useState(0.85);
   const [uploading, setUploading] = useState(false);
   const [uploadPct, setUploadPct] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -145,7 +152,7 @@ function WorkflowStarter({ onStarted }: { onStarted: () => void }) {
     setUploading(true);
     setUploadPct(0);
     try {
-      await startWorkflow(file, sceneName || file.name.replace(/\.[^.]+$/, ""), maxIter, setUploadPct);
+      await startWorkflow(file, sceneName || file.name.replace(/\.[^.]+$/, ""), maxIter, setUploadPct, psnrThreshold, ssimThreshold);
       setFile(null);
       setSceneName("");
       onStarted();
@@ -199,6 +206,14 @@ function WorkflowStarter({ onStarted }: { onStarted: () => void }) {
         <label>
           <span>Max iterations</span>
           <input type="number" min={1} max={10} value={maxIter} onChange={(e) => setMaxIter(Number(e.target.value))} />
+        </label>
+        <label>
+          <span>PSNR threshold</span>
+          <input type="number" min={10} max={50} step={0.5} value={psnrThreshold} onChange={(e) => setPsnrThreshold(Number(e.target.value))} />
+        </label>
+        <label>
+          <span>SSIM threshold</span>
+          <input type="number" min={0.5} max={1.0} step={0.01} value={ssimThreshold} onChange={(e) => setSsimThreshold(Number(e.target.value))} />
         </label>
         <button type="submit" disabled={!file || uploading}>
           {uploading ? `Uploading ${uploadPct}%` : "Start Workflow"}
@@ -358,6 +373,7 @@ function DetailPanel({
   const pp = prevItem?.processing_params;
   const s = metrics?.summary;
   const ps = prevMetrics?.summary;
+  const backend = p.reconstruction_backend ?? "3dgrut";
 
   // Parse agent notes and reverse so newest is on top
   const noteLines = item.description ? item.description.split("\n").filter(Boolean).reverse() : [];
@@ -368,12 +384,26 @@ function DetailPanel({
       <div className="detail-section">
         <h3>Parameters{prevItem ? ` (vs ${prevItem.name})` : ""}</h3>
         <div className="param-grid">
+          <ParamDiff label="Backend" current={paramStr(p, "reconstruction_backend", "3dgrut")} previous={pp ? paramStr(pp, "reconstruction_backend", "3dgrut") : undefined} />
           <ParamDiff label="Frame Rate" current={paramStr(p, "frame_rate", "2.0")} previous={pp ? paramStr(pp, "frame_rate", "2.0") : undefined} />
-          <ParamDiff label="Max Epochs" current={paramStr(p, "fvdb_max_epochs", "40")} previous={pp ? paramStr(pp, "fvdb_max_epochs", "40") : undefined} />
-          <ParamDiff label="SH Degree" current={paramStr(p, "fvdb_sh_degree", "3")} previous={pp ? paramStr(pp, "fvdb_sh_degree", "3") : undefined} />
-          <ParamDiff label="Downsample" current={p.fvdb_image_downsample_factor != null ? `${p.fvdb_image_downsample_factor}x` : "6x (default)"} previous={pp ? (pp.fvdb_image_downsample_factor != null ? `${pp.fvdb_image_downsample_factor}x` : "6x (default)") : undefined} />
+          <ParamDiff label="Mapper Type" current={paramStr(p, "colmap_mapper_type", "incremental")} previous={pp ? paramStr(pp, "colmap_mapper_type", "incremental") : undefined} />
+          <ParamDiff label="Max Features" current={paramStr(p, "colmap_max_num_features", "8192")} previous={pp ? paramStr(pp, "colmap_max_num_features", "8192") : undefined} />
           <ParamDiff label="Matcher Overlap" current={paramStr(p, "sequential_matcher_overlap", "12")} previous={pp ? paramStr(pp, "sequential_matcher_overlap", "12") : undefined} />
-          <ParamDiff label="Splat Only" current={paramStr(p, "splat_only_mode", "true")} previous={pp ? paramStr(pp, "splat_only_mode", "true") : undefined} />
+          {backend === "3dgrut" ? (
+            <>
+              <ParamDiff label="GRUT Iterations" current={paramStr(p, "grut_n_iterations", "30000")} previous={pp ? paramStr(pp, "grut_n_iterations", "30000") : undefined} />
+              <ParamDiff label="GRUT Render" current={paramStr(p, "grut_render_method", "3dgrt")} previous={pp ? paramStr(pp, "grut_render_method", "3dgrt") : undefined} />
+              <ParamDiff label="GRUT Strategy" current={paramStr(p, "grut_strategy", "gs")} previous={pp ? paramStr(pp, "grut_strategy", "gs") : undefined} />
+              <ParamDiff label="GRUT Downsample" current={p.grut_downsample_factor != null ? `${p.grut_downsample_factor}x` : "2x (default)"} previous={pp ? (pp.grut_downsample_factor != null ? `${pp.grut_downsample_factor}x` : "2x (default)") : undefined} />
+            </>
+          ) : (
+            <>
+              <ParamDiff label="fVDB Epochs" current={paramStr(p, "fvdb_max_epochs", "40")} previous={pp ? paramStr(pp, "fvdb_max_epochs", "40") : undefined} />
+              <ParamDiff label="fVDB SH Degree" current={paramStr(p, "fvdb_sh_degree", "3")} previous={pp ? paramStr(pp, "fvdb_sh_degree", "3") : undefined} />
+              <ParamDiff label="fVDB Downsample" current={p.fvdb_image_downsample_factor != null ? `${p.fvdb_image_downsample_factor}x` : "6x (default)"} previous={pp ? (pp.fvdb_image_downsample_factor != null ? `${pp.fvdb_image_downsample_factor}x` : "6x (default)") : undefined} />
+            </>
+          )}
+          <ParamDiff label="Splat Only" current={paramStr(p, "splat_only_mode", "false")} previous={pp ? paramStr(pp, "splat_only_mode", "false") : undefined} />
         </div>
       </div>
 
@@ -383,11 +413,52 @@ function DetailPanel({
           <h3>Training Metrics{ps ? ` (vs ${prevItem?.name})` : ""}</h3>
           <div className="param-grid">
             <MetricValue label="Loss" value={s["reconstruct/loss"]?.toFixed(4) ?? "\u2014"} good={s["reconstruct/loss"] != null ? s["reconstruct/loss"] < 0.25 : undefined} diff={metricDiffStr(s["reconstruct/loss"], ps?.["reconstruct/loss"])} />
-            <MetricValue label="SSIM" value={s["reconstruct/ssimloss"]?.toFixed(4) ?? "\u2014"} good={s["reconstruct/ssimloss"] != null ? s["reconstruct/ssimloss"] > 0.85 : undefined} diff={metricDiffStr(s["reconstruct/ssimloss"], ps?.["reconstruct/ssimloss"])} />
+            <MetricValue label="SSIM Loss" value={s["reconstruct/ssimloss"]?.toFixed(4) ?? "\u2014"} good={s["reconstruct/ssimloss"] != null ? s["reconstruct/ssimloss"] > 0.85 : undefined} diff={metricDiffStr(s["reconstruct/ssimloss"], ps?.["reconstruct/ssimloss"])} />
+            <MetricValue label="PSNR (dB)" value={s["reconstruct/psnr"]?.toFixed(2) ?? "\u2014"} good={s["reconstruct/psnr"] != null ? s["reconstruct/psnr"] > 25 : undefined} diff={metricDiffStr(s["reconstruct/psnr"], ps?.["reconstruct/psnr"])} />
+            <MetricValue label="SSIM" value={s["reconstruct/ssim"]?.toFixed(4) ?? "\u2014"} good={s["reconstruct/ssim"] != null ? s["reconstruct/ssim"] > 0.85 : undefined} diff={metricDiffStr(s["reconstruct/ssim"], ps?.["reconstruct/ssim"])} />
             <MetricValue label="L1 Loss" value={s["reconstruct/l1loss"]?.toFixed(4) ?? "\u2014"} diff={metricDiffStr(s["reconstruct/l1loss"], ps?.["reconstruct/l1loss"])} />
             <MetricValue label="Gaussians" value={s["reconstruct/num_gaussians"]?.toLocaleString() ?? "\u2014"} />
             <MetricValue label="GPU Mem" value={s["reconstruct/mem_allocated"] != null ? `${s["reconstruct/mem_allocated"].toFixed(2)} GB` : "\u2014"} />
             <MetricValue label="SH Degree" value={s["reconstruct/sh_degree"]?.toFixed(0) ?? "\u2014"} />
+          </div>
+        </div>
+      ) : null}
+
+      {/* Simulation-ready downloads */}
+      {(item.artifact_usdz_url || item.artifact_collision_mesh_url || item.artifact_ply_url) ? (
+        <div className="detail-section detail-full-width">
+          <h3>Simulation-Ready Assets</h3>
+          <div className="sim-assets">
+            {item.artifact_usdz_url ? (
+              <a className="sim-asset-btn sim-asset-usdz" href={absoluteArtifactUrl(item.artifact_usdz_url) ?? undefined} download onClick={(e) => e.stopPropagation()}>
+                <span className="sim-asset-icon">&#x1F30D;</span>
+                <span className="sim-asset-info">
+                  <span className="sim-asset-name">NuRec USDZ</span>
+                  <span className="sim-asset-desc">Visual asset for Omniverse / Isaac Sim</span>
+                </span>
+                <span className="sim-asset-dl">&#x2B07;</span>
+              </a>
+            ) : null}
+            {item.artifact_collision_mesh_url ? (
+              <a className="sim-asset-btn sim-asset-collision" href={absoluteArtifactUrl(item.artifact_collision_mesh_url) ?? undefined} download onClick={(e) => e.stopPropagation()}>
+                <span className="sim-asset-icon">&#x1F9F1;</span>
+                <span className="sim-asset-info">
+                  <span className="sim-asset-name">Collision Mesh (OBJ)</span>
+                  <span className="sim-asset-desc">Physics collision geometry for Isaac Sim</span>
+                </span>
+                <span className="sim-asset-dl">&#x2B07;</span>
+              </a>
+            ) : null}
+            {item.artifact_ply_url ? (
+              <a className="sim-asset-btn sim-asset-ply" href={absoluteArtifactUrl(item.artifact_ply_url) ?? undefined} download onClick={(e) => e.stopPropagation()}>
+                <span className="sim-asset-icon">&#x2B50;</span>
+                <span className="sim-asset-info">
+                  <span className="sim-asset-name">Gaussian Splat (PLY)</span>
+                  <span className="sim-asset-desc">Raw 3D Gaussian point cloud</span>
+                </span>
+                <span className="sim-asset-dl">&#x2B07;</span>
+              </a>
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -631,7 +702,10 @@ export default function ReconstructionDashboard() {
                             <a className="ply-link" href={absoluteArtifactUrl(item.artifact_ply_url) ?? undefined} download onClick={(e) => e.stopPropagation()}>&#x2B07; PLY</a>
                           ) : null}
                           {item.artifact_usdz_url ? (
-                            <a href={absoluteArtifactUrl(item.artifact_usdz_url) ?? undefined} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>USDZ</a>
+                            <a href={absoluteArtifactUrl(item.artifact_usdz_url) ?? undefined} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>NuRec USDZ</a>
+                          ) : null}
+                          {item.artifact_collision_mesh_url ? (
+                            <a href={absoluteArtifactUrl(item.artifact_collision_mesh_url) ?? undefined} download onClick={(e) => e.stopPropagation()}>Collision OBJ</a>
                           ) : null}
                           {item.artifact_bundle_url ? (
                             <a href={absoluteArtifactUrl(item.artifact_bundle_url) ?? undefined} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>ZIP</a>

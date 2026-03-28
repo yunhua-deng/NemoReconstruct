@@ -553,13 +553,11 @@ This section walks through a concrete example using the NemoReconstruct 3D recon
 git clone https://github.com/clayton-littlejohn/NemoReconstruct.git ~/NemoReconstruct
 cd ~/NemoReconstruct
 
-# Create a Python venv and install dependencies
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r backend/requirements.txt
+# One-command setup — creates .venv, installs Python + Node dependencies
+make setup
 
 # (Optional) Install the Python SDK
-pip install -e sdk/python
+.venv/bin/pip install -e sdk/python
 ```
 
 ### Start the backend
@@ -572,9 +570,8 @@ make backend-dev
 
 Or run manually:
 ```bash
-source .venv/bin/activate
-cd backend
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8010
+cd ~/NemoReconstruct/backend
+../.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8010
 ```
 
 Verify:

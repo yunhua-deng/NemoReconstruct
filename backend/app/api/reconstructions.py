@@ -25,6 +25,7 @@ ARTIFACT_FIELDS = {
     "source_video": "source_video_path",
     "splat_ply": "artifact_ply_path",
     "scene_usdz": "artifact_usdz_path",
+    "collision_mesh": "artifact_collision_mesh_path",
     "sim_bundle": "artifact_bundle_path",
     "run_log": "artifact_log_path",
     "metadata": "artifact_metadata_path",
@@ -55,10 +56,20 @@ def build_processing_params(
     sequential_matcher_overlap: int | None,
     colmap_mapper_type: str | None,
     colmap_max_num_features: int | None,
+    reconstruction_backend: str | None,
     fvdb_max_epochs: int | None,
     fvdb_sh_degree: int | None,
     fvdb_image_downsample_factor: int | None,
+    grut_n_iterations: int | None,
+    grut_render_method: str | None,
+    grut_strategy: str | None,
+    grut_downsample_factor: int | None,
     splat_only_mode: bool | None,
+    collision_mesh_enabled: bool | None = None,
+    collision_mesh_method: str | None = None,
+    collision_mesh_target_faces: int | None = None,
+    collision_mesh_alpha: float | None = None,
+    collision_mesh_downsample: int | None = None,
 ) -> ReconstructionParams:
     try:
         return ReconstructionParams(
@@ -66,10 +77,20 @@ def build_processing_params(
             sequential_matcher_overlap=sequential_matcher_overlap,
             colmap_mapper_type=colmap_mapper_type,
             colmap_max_num_features=colmap_max_num_features,
+            reconstruction_backend=reconstruction_backend,
             fvdb_max_epochs=fvdb_max_epochs,
             fvdb_sh_degree=fvdb_sh_degree,
             fvdb_image_downsample_factor=fvdb_image_downsample_factor,
+            grut_n_iterations=grut_n_iterations,
+            grut_render_method=grut_render_method,
+            grut_strategy=grut_strategy,
+            grut_downsample_factor=grut_downsample_factor,
             splat_only_mode=splat_only_mode,
+            collision_mesh_enabled=collision_mesh_enabled,
+            collision_mesh_method=collision_mesh_method,
+            collision_mesh_target_faces=collision_mesh_target_faces,
+            collision_mesh_alpha=collision_mesh_alpha,
+            collision_mesh_downsample=collision_mesh_downsample,
         )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors())
@@ -94,6 +115,7 @@ def serialize_reconstruction(reconstruction: Reconstruction) -> ReconstructionDe
         processing_params=serialize_processing_params(reconstruction),
         artifact_ply_url=build_download_url(reconstruction.id, "splat_ply") if reconstruction.artifact_ply_path else None,
         artifact_usdz_url=build_download_url(reconstruction.id, "scene_usdz") if reconstruction.artifact_usdz_path else None,
+        artifact_collision_mesh_url=build_download_url(reconstruction.id, "collision_mesh") if reconstruction.artifact_collision_mesh_path else None,
         artifact_bundle_url=build_download_url(reconstruction.id, "sim_bundle") if reconstruction.artifact_bundle_path else None,
         artifact_log_url=build_download_url(reconstruction.id, "run_log") if reconstruction.artifact_log_path else None,
         artifact_metadata_url=build_download_url(reconstruction.id, "metadata") if reconstruction.artifact_metadata_path else None,
@@ -121,10 +143,20 @@ def upload_reconstruction(
     sequential_matcher_overlap: int | None = Form(None),
     colmap_mapper_type: str | None = Form(None),
     colmap_max_num_features: int | None = Form(None),
+    reconstruction_backend: str | None = Form(None),
     fvdb_max_epochs: int | None = Form(None),
     fvdb_sh_degree: int | None = Form(None),
     fvdb_image_downsample_factor: int | None = Form(None),
+    grut_n_iterations: int | None = Form(None),
+    grut_render_method: str | None = Form(None),
+    grut_strategy: str | None = Form(None),
+    grut_downsample_factor: int | None = Form(None),
     splat_only_mode: bool | None = Form(None),
+    collision_mesh_enabled: bool | None = Form(None),
+    collision_mesh_method: str | None = Form(None),
+    collision_mesh_target_faces: int | None = Form(None),
+    collision_mesh_alpha: float | None = Form(None),
+    collision_mesh_downsample: int | None = Form(None),
     db: Session = Depends(get_db),
 ) -> UploadResponse:
     suffix = Path(file.filename or "upload.mov").suffix.lower()
@@ -136,10 +168,20 @@ def upload_reconstruction(
         sequential_matcher_overlap,
         colmap_mapper_type,
         colmap_max_num_features,
+        reconstruction_backend,
         fvdb_max_epochs,
         fvdb_sh_degree,
         fvdb_image_downsample_factor,
+        grut_n_iterations,
+        grut_render_method,
+        grut_strategy,
+        grut_downsample_factor,
         splat_only_mode,
+        collision_mesh_enabled,
+        collision_mesh_method,
+        collision_mesh_target_faces,
+        collision_mesh_alpha,
+        collision_mesh_downsample,
     )
 
     reconstruction = Reconstruction(
@@ -208,6 +250,7 @@ def get_reconstruction_artifacts(reconstruction_id: str, db: Session = Depends(g
         source_video_url=build_download_url(reconstruction.id, "source_video"),
         splat_ply_url=build_download_url(reconstruction.id, "splat_ply") if reconstruction.artifact_ply_path else None,
         scene_usdz_url=build_download_url(reconstruction.id, "scene_usdz") if reconstruction.artifact_usdz_path else None,
+        collision_mesh_url=build_download_url(reconstruction.id, "collision_mesh") if reconstruction.artifact_collision_mesh_path else None,
         sim_bundle_url=build_download_url(reconstruction.id, "sim_bundle") if reconstruction.artifact_bundle_path else None,
         run_log_url=build_download_url(reconstruction.id, "run_log") if reconstruction.artifact_log_path else None,
         metadata_url=build_download_url(reconstruction.id, "metadata") if reconstruction.artifact_metadata_path else None,
@@ -232,6 +275,8 @@ def download_artifact(reconstruction_id: str, artifact: str, db: Session = Depen
     media_type = None
     if artifact == "scene_usdz":
         media_type = "model/vnd.usdz+zip"
+    elif artifact == "collision_mesh":
+        media_type = "model/obj"
     elif artifact == "sim_bundle":
         media_type = "application/zip"
     elif artifact == "run_log":
@@ -287,14 +332,20 @@ def retry_reconstruction(
     reconstruction.error_message = None
     reconstruction.started_at = None
     reconstruction.completed_at = None
-    reconstruction.frame_count = None
     reconstruction.artifact_ply_path = None
     reconstruction.artifact_usdz_path = None
+    reconstruction.artifact_collision_mesh_path = None
     reconstruction.artifact_bundle_path = None
     reconstruction.artifact_log_path = None
     reconstruction.artifact_metadata_path = None
     if request and request.params is not None:
-        reconstruction.processing_params_json = request.params.model_dump_json(exclude_none=True)
+        # Merge new params with existing ones (new values override)
+        existing_params: dict = {}
+        if reconstruction.processing_params_json:
+            existing_params = json.loads(reconstruction.processing_params_json)
+        new_params = request.params.model_dump(exclude_none=True)
+        existing_params.update(new_params)
+        reconstruction.processing_params_json = json.dumps(existing_params)
     db.add(reconstruction)
     db.commit()
     db.refresh(reconstruction)

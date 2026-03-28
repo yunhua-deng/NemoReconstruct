@@ -1,8 +1,5 @@
-{
-  "openapi": "3.1.0",
-  "info": {
-    "title": "NemoReconstruct API",
-    "description": "Minimal MOV-to-fVDB reconstruction workflow for Isaac Sim and agent orchestration.",
+Wrote OpenAPI schema to /home/clayton_littlejohn/devl/github/NemoReconstruct/docs/openapi.json
+imal video-to-3D reconstruction pipeline (3DGRUT / fVDB) controlled by AI agents.",
     "version": "0.1.0"
   },
   "paths": {
@@ -896,6 +893,16 @@
             "type": "integer",
             "title": "Max Iterations",
             "default": 3
+          },
+          "accept_psnr_threshold": {
+            "type": "number",
+            "title": "Accept Psnr Threshold",
+            "default": 25.0
+          },
+          "accept_ssim_threshold": {
+            "type": "number",
+            "title": "Accept Ssim Threshold",
+            "default": 0.85
           }
         },
         "type": "object",
@@ -971,6 +978,17 @@
             ],
             "title": "Colmap Max Num Features"
           },
+          "reconstruction_backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reconstruction Backend"
+          },
           "fvdb_max_epochs": {
             "anyOf": [
               {
@@ -1004,6 +1022,50 @@
             ],
             "title": "Fvdb Image Downsample Factor"
           },
+          "grut_n_iterations": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grut N Iterations"
+          },
+          "grut_render_method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grut Render Method"
+          },
+          "grut_strategy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grut Strategy"
+          },
+          "grut_downsample_factor": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grut Downsample Factor"
+          },
           "splat_only_mode": {
             "anyOf": [
               {
@@ -1014,6 +1076,61 @@
               }
             ],
             "title": "Splat Only Mode"
+          },
+          "collision_mesh_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collision Mesh Enabled"
+          },
+          "collision_mesh_method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collision Mesh Method"
+          },
+          "collision_mesh_target_faces": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collision Mesh Target Faces"
+          },
+          "collision_mesh_alpha": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collision Mesh Alpha"
+          },
+          "collision_mesh_downsample": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collision Mesh Downsample"
           }
         },
         "type": "object",
@@ -1349,6 +1466,17 @@
             ],
             "title": "Scene Usdz Url"
           },
+          "collision_mesh_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collision Mesh Url"
+          },
           "sim_bundle_url": {
             "anyOf": [
               {
@@ -1519,6 +1647,17 @@
             ],
             "title": "Artifact Usdz Url"
           },
+          "artifact_collision_mesh_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Collision Mesh Url"
+          },
           "artifact_bundle_url": {
             "anyOf": [
               {
@@ -1618,6 +1757,18 @@
             ],
             "title": "Colmap Max Num Features"
           },
+          "reconstruction_backend": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(fvdb|3dgrut)$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reconstruction Backend"
+          },
           "fvdb_max_epochs": {
             "anyOf": [
               {
@@ -1657,6 +1808,56 @@
             ],
             "title": "Fvdb Image Downsample Factor"
           },
+          "grut_n_iterations": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 100000.0,
+                "minimum": 1000.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grut N Iterations"
+          },
+          "grut_render_method": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(3dgrt|3dgut)$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grut Render Method"
+          },
+          "grut_strategy": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(gs|mcmc)$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grut Strategy"
+          },
+          "grut_downsample_factor": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 12.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grut Downsample Factor"
+          },
           "splat_only_mode": {
             "anyOf": [
               {
@@ -1667,6 +1868,68 @@
               }
             ],
             "title": "Splat Only Mode"
+          },
+          "collision_mesh_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collision Mesh Enabled"
+          },
+          "collision_mesh_method": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(alpha|convex_hull)$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collision Mesh Method"
+          },
+          "collision_mesh_target_faces": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 500000.0,
+                "minimum": 500.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collision Mesh Target Faces"
+          },
+          "collision_mesh_alpha": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 100.0,
+                "minimum": 0.01
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collision Mesh Alpha"
+          },
+          "collision_mesh_downsample": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 64.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collision Mesh Downsample"
           }
         },
         "type": "object",
@@ -1869,6 +2132,17 @@
             ],
             "title": "Artifact Usdz Url"
           },
+          "artifact_collision_mesh_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Collision Mesh Url"
+          },
           "artifact_bundle_url": {
             "anyOf": [
               {
@@ -2045,6 +2319,17 @@
             ],
             "title": "Artifact Usdz Url"
           },
+          "artifact_collision_mesh_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Collision Mesh Url"
+          },
           "artifact_bundle_url": {
             "anyOf": [
               {
@@ -2180,6 +2465,16 @@
             "type": "integer",
             "title": "Max Iterations",
             "default": 3
+          },
+          "accept_psnr_threshold": {
+            "type": "number",
+            "title": "Accept Psnr Threshold",
+            "default": 25.0
+          },
+          "accept_ssim_threshold": {
+            "type": "number",
+            "title": "Accept Ssim Threshold",
+            "default": 0.85
           },
           "last_verdict": {
             "anyOf": [

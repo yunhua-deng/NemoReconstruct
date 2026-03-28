@@ -1,13 +1,15 @@
 # NemoReconstruct
 
-A minimal 3D reconstruction pipeline designed as a **NemoClaw + OpenShell demo** — upload a video, get a Gaussian Splat PLY, all controlled by an AI agent running inside an isolated sandbox with local inference.
+A fully local Physical AI pipeline — upload a video, get an Omniverse-ready **NuRec USDZ** scene with 3D Gaussians, all orchestrated by an AI agent running inside an isolated sandbox with local inference.
+
+The pipeline uses **NemoClaw** as the agentic orchestrator, **3DGRUT** for neural Gaussian reconstruction, and exports to the **Omniverse NuRec** format for physics simulation and collision visualization in Isaac Sim.
 
 > **This repo is a template.** The [setup guide](docs/NEMOCLAW_SETUP.md) shows how to pair NemoClaw + OpenShell with **any** repo or API — NemoReconstruct is just the example project.
 
 ```
-Video → ffmpeg → COLMAP → fVDB/frgs → PLY
-                    ↑ controlled by ↑
-              NemoClaw Agent (OpenClaw)
+Video → ffmpeg → COLMAP → 3DGRUT → NuRec USDZ + PLY
+                    ↑ orchestrated by ↑
+              NemoClaw Agent (Nemotron)
               inside OpenShell Sandbox
               powered by Ollama (local LLM)
 ```
@@ -20,17 +22,22 @@ Video → ffmpeg → COLMAP → fVDB/frgs → PLY
 > See [the full tutorial](docs/NEMOCLAW_SETUP.md) for step-by-step install of every prerequisite.
 
 ```bash
-# 1. Start the backend (leave running)
-cd ~/NemoReconstruct && make backend-dev
+# 1. Clone and install
+git clone https://github.com/clayton-littlejohn/NemoReconstruct.git ~/NemoReconstruct
+cd ~/NemoReconstruct
+make setup                    # creates .venv, installs Python + Node deps
 
-# 2. One-time OpenShell + Ollama setup (see full guide for details)
+# 2. Start the backend (leave running)
+make backend-dev              # starts on 0.0.0.0:8010
+
+# 3. One-time OpenShell + Ollama setup (see full guide for details)
 openshell gateway start --gpu
 openshell provider create --name ollama --type openai \
   --credential OPENAI_API_KEY=empty \
   --config OPENAI_BASE_URL=http://host.openshell.internal:11434/v1
 openshell inference set --provider ollama --model glm-4.7-flash
 
-# 3. Run the agent in a sandbox
+# 4. Run the agent in a sandbox
 openshell sandbox create \
   --from openclaw \
   --policy nemoclaw/sandbox-policy.yaml \
@@ -53,10 +60,10 @@ openclaw agent --local --session-id demo \
 ## What the Agent Can Do
 
 - Upload videos and start reconstruction jobs
-- Tune parameters (frame rate, epochs, downsample factor, quality presets)
+- Tune parameters (iterations, downsample factor, render method, quality presets)
 - Monitor progress in real time
-- Download PLY splat outputs
-- Retry failed jobs with adjusted settings
+- Download NuRec USDZ and PLY splat outputs
+- Iterate on its own outputs — the evaluator agent analyzes metrics and retries with better parameters
 - Inspect logs and system state via shell
 
 ---
@@ -82,6 +89,9 @@ docs/             OpenAPI schema, setup guide
 | `nemoclaw/sandbox-openclaw-template.json` | Generic OpenClaw config — copy and customize for your project |
 | `nemoclaw/nemoclaw_config.yaml` | Agent tools, model, guardrails |
 | `nemoclaw/system_prompt.md` | Agent persona and workflow rules |
+| `nemoclaw/runner_prompt.md` | Runner agent prompt — executes pipelines |
+| `nemoclaw/evaluator_prompt.md` | Evaluator agent prompt — analyzes metrics |
+| `nemoclaw/orchestrate.sh` | Multi-agent orchestrator — Runner→Evaluator loop |
 | `nemoclaw/example_session.py` | SDK script to test the pipeline without an agent |
 
 ---
@@ -111,10 +121,17 @@ Pass these to `POST /api/v1/reconstructions/upload`:
 |-----------|-------|---------|--------|
 | `frame_rate` | 0.25 – 12.0 | 2.0 | Frames/sec extracted by ffmpeg |
 | `sequential_matcher_overlap` | 2 – 50 | 12 | COLMAP matcher overlap |
+| `colmap_mapper_type` | incremental / global | incremental | COLMAP mapper algorithm ('global' uses GLOMAP) |
+| `colmap_max_num_features` | 1000 – 32768 | 8192 | Max SIFT features per image |
+| `reconstruction_backend` | 3dgrut / fvdb | 3dgrut | Reconstruction backend |
+| `grut_n_iterations` | 1000 – 100000 | 30000 | 3DGRUT training iterations |
+| `grut_render_method` | 3dgrt / 3dgut | 3dgrt | 3DGRUT render method |
+| `grut_strategy` | gs / mcmc | gs | 3DGRUT densification strategy |
+| `grut_downsample_factor` | 1 – 12 | 2 | Image downsampling for 3DGRUT |
 | `fvdb_max_epochs` | 5 – 500 | 40 | fVDB training epochs |
 | `fvdb_sh_degree` | 0 – 4 | 3 | Spherical harmonics degree |
-| `fvdb_image_downsample_factor` | 1 – 12 | 6 | Input image downsampling |
-| `splat_only_mode` | true/false | true | Skip USDZ, produce PLY only |
+| `fvdb_image_downsample_factor` | 1 – 12 | 6 | Input image downsampling for fVDB |
+| `splat_only_mode` | true/false | false | Skip USDZ, produce PLY only |
 
 ---
 
@@ -126,7 +143,8 @@ curl -s -X POST http://localhost:8010/api/v1/reconstructions/upload \
   -F "file=@/path/to/video.MOV" \
   -F "name=my-scene" \
   -F "frame_rate=2.0" \
-  -F "fvdb_max_epochs=40"
+  -F "reconstruction_backend=3dgrut" \
+  -F "grut_n_iterations=30000"
 ```
 
 ### Poll status
@@ -146,7 +164,7 @@ from nemo_reconstruct_client import NemoReconstructClient
 
 client = NemoReconstructClient("http://localhost:8010")
 job = client.upload_video("/tmp/scene.mov", "my-scene",
-    params={"fvdb_max_epochs": 40, "splat_only_mode": True})
+    params={"reconstruction_backend": "3dgrut", "grut_n_iterations": 30000})
 result = client.wait_for_completion(job.id)
 print(client.get_artifacts(job.id))
 ```
@@ -156,28 +174,35 @@ print(client.get_artifacts(job.id))
 ## Development
 
 ```bash
-# Backend
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r backend/requirements.txt
-make backend-dev                # Starts on 0.0.0.0:8010
+# One-time setup — creates .venv, installs Python + Node dependencies
+make setup
 
-# Frontend (optional)
-cd frontend && npm install
-make frontend-dev               # Starts on localhost:3000
+# Start the backend   (0.0.0.0:8010, auto-reloads on code change)
+make backend-dev
+
+# Start the frontend  (localhost:3000, optional)
+cp frontend/.env.example frontend/.env.local   # only needed once
+make frontend-dev
 
 # Export OpenAPI schema
 make openapi
 
 # Install Python SDK
-pip install -e sdk/python
+.venv/bin/pip install -e sdk/python
 ```
+
+> **Note:** `make backend-dev` and the other targets automatically use `.venv/bin/python` — you do not need to activate the virtualenv.
 
 ### System Requirements
 
-Pipeline binaries (must be on PATH or configured):
-- `ffmpeg`
-- `colmap`
-- `frgs` from NVIDIA fVDB Reality Capture (typically at `~/miniconda3/envs/fvdb/bin/frgs`)
+Pipeline binaries (must be on PATH or configured via env vars):
+- **`ffmpeg`** — frame extraction
+- **`colmap`** — feature extraction, matching, sparse reconstruction
+- **3DGRUT** (default backend) — neural Gaussian reconstruction + NuRec USDZ export, installed at `/opt/3dgrut`, conda env `3dgrut` (see `NEMO_RECONSTRUCT_GRUT_INSTALL_DIR`)
+- **CUDA toolkit** — headers at `/usr/local/cuda` for JIT C++ extension builds
+- **fVDB / `frgs`** (alternative backend) — conda env `fvdb` (typically at `~/miniconda3/envs/fvdb/bin/frgs`)
+
+All paths are configurable via environment variables or a `.env` file in the backend directory (prefix: `NEMO_RECONSTRUCT_`).
 
 ---
 
@@ -196,7 +221,7 @@ Pipeline binaries (must be on PATH or configured):
 │  │  NemoReconstruct API (:8010)                                │ │
 │  │       │                                                      │ │
 │  │       ▼                                                      │ │
-│  │  ffmpeg → COLMAP → fVDB/frgs → PLY splat                   │ │
+│  │  ffmpeg → COLMAP → 3DGRUT (or fVDB) → PLY + USDZ           │ │
 │  └──────────────────────────────────────────────────────────────┘ │
 │                                    │                             │
 │                                    ▼                             │

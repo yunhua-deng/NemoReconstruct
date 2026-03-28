@@ -28,7 +28,8 @@
     }
   },
   "tools": {
-    "profile": "coding"
+    "profile": "coding",
+    "deny": ["web_fetch"]
   },
   "commands": {
     "native": "auto",

@@ -11,10 +11,20 @@ class ReconstructionParams(BaseModel):
     sequential_matcher_overlap: int | None = Field(default=None, ge=2, le=50)
     colmap_mapper_type: str | None = Field(default=None, pattern="^(incremental|global)$")
     colmap_max_num_features: int | None = Field(default=None, ge=1000, le=32768)
+    reconstruction_backend: str | None = Field(default=None, pattern="^(fvdb|3dgrut)$")
     fvdb_max_epochs: int | None = Field(default=None, ge=5, le=500)
     fvdb_sh_degree: int | None = Field(default=None, ge=0, le=4)
     fvdb_image_downsample_factor: int | None = Field(default=None, ge=1, le=12)
+    grut_n_iterations: int | None = Field(default=None, ge=1000, le=100000)
+    grut_render_method: str | None = Field(default=None, pattern="^(3dgrt|3dgut)$")
+    grut_strategy: str | None = Field(default=None, pattern="^(gs|mcmc)$")
+    grut_downsample_factor: int | None = Field(default=None, ge=1, le=12)
     splat_only_mode: bool | None = None
+    collision_mesh_enabled: bool | None = None
+    collision_mesh_method: str | None = Field(default=None, pattern="^(alpha|convex_hull)$")
+    collision_mesh_target_faces: int | None = Field(default=None, ge=500, le=500000)
+    collision_mesh_alpha: float | None = Field(default=None, ge=0.01, le=100.0)
+    collision_mesh_downsample: int | None = Field(default=None, ge=1, le=64)
 
 
 class HealthResponse(BaseModel):
@@ -54,6 +64,7 @@ class ReconstructionBase(BaseModel):
 class ReconstructionDetail(ReconstructionBase):
     artifact_ply_url: str | None = None
     artifact_usdz_url: str | None = None
+    artifact_collision_mesh_url: str | None = None
     artifact_bundle_url: str | None = None
     artifact_log_url: str | None = None
     artifact_metadata_url: str | None = None
@@ -72,6 +83,7 @@ class ReconstructionArtifacts(BaseModel):
     source_video_url: str
     splat_ply_url: str | None = None
     scene_usdz_url: str | None = None
+    collision_mesh_url: str | None = None
     sim_bundle_url: str | None = None
     run_log_url: str | None = None
     metadata_url: str | None = None
@@ -142,6 +154,8 @@ class WorkflowDetail(BaseModel):
     current_step: str | None = None
     iteration: int = 0
     max_iterations: int = 3
+    accept_psnr_threshold: float = 25.0
+    accept_ssim_threshold: float = 0.85
     last_verdict: str | None = None
     last_reason: str | None = None
     reconstruction_id: str | None = None

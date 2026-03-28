@@ -26,15 +26,28 @@ class Settings(BaseSettings):
     fvdb_conda_env: str = "fvdb"
     fvdb_conda_root: Path = Field(default_factory=lambda: Path.home() / "miniconda3" / "envs")
 
+    grut_install_dir: Path = Field(default_factory=lambda: Path("/opt/3dgrut"))
+    grut_conda_env: str = "3dgrut"
+
     frame_rate: float = 2.0
     max_upload_size_mb: int = 4096
     sequential_matcher_overlap: int = 12
     colmap_mapper_type: str = "incremental"
     colmap_max_num_features: int = 8192
+    reconstruction_backend: str = "3dgrut"
     fvdb_max_epochs: int = 40
     fvdb_sh_degree: int = 3
     fvdb_image_downsample_factor: int = 6
-    splat_only_mode: bool = True
+    grut_n_iterations: int = 30000
+    grut_render_method: str = "3dgrt"
+    grut_strategy: str = "gs"
+    grut_downsample_factor: int = 2
+    splat_only_mode: bool = False
+    collision_mesh_enabled: bool = True
+    collision_mesh_method: str = "alpha"
+    collision_mesh_target_faces: int = 50000
+    collision_mesh_alpha: float = 0.0  # 0 = auto
+    collision_mesh_downsample: int = 4
 
     model_config = SettingsConfigDict(
         env_file=".env",

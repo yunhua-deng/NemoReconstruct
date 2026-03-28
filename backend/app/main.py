@@ -26,7 +26,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(
     title="NemoReconstruct API",
     version="0.1.0",
-    description="Minimal MOV-to-fVDB reconstruction workflow for Isaac Sim and agent orchestration.",
+    description="Minimal video-to-3D reconstruction pipeline (3DGRUT / fVDB) controlled by AI agents.",
     docs_url=settings.docs_url,
     openapi_url=settings.openapi_url,
     redoc_url=settings.redoc_url,

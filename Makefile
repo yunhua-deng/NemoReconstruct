@@ -1,12 +1,21 @@
-PYTHON ?= python3
+VENV      := .venv
+VENV_BIN  := $(VENV)/bin
+PYTHON    := $(VENV_BIN)/python
+PIP       := $(VENV_BIN)/pip
 
-.PHONY: backend-install backend-dev frontend-install frontend-dev openapi
+.PHONY: backend-install backend-dev frontend-install frontend-dev openapi setup
 
-backend-install:
-	cd backend && $(PYTHON) -m pip install -r requirements.txt
+# ── First-time setup ──────────────────────────────────────────────
+setup: $(VENV)/pyvenv.cfg backend-install frontend-install
 
-backend-dev:
-	cd backend && $(PYTHON) -m uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
+$(VENV)/pyvenv.cfg:
+	python3 -m venv $(VENV)
+
+backend-install: $(VENV)/pyvenv.cfg
+	$(PIP) install -r backend/requirements.txt
+
+backend-dev: $(VENV)/pyvenv.cfg
+	cd backend && $(CURDIR)/$(PYTHON) -m uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
 
 frontend-install:
 	cd frontend && npm install
@@ -14,5 +23,5 @@ frontend-install:
 frontend-dev:
 	cd frontend && npm run dev
 
-openapi:
-	cd backend && $(PYTHON) export_openapi.py
+openapi: $(VENV)/pyvenv.cfg
+	cd backend && $(CURDIR)/$(PYTHON) export_openapi.py

@@ -35,6 +35,7 @@ class ReconstructionRunner:
                         ReconstructionStatus.feature_matching.value,
                         ReconstructionStatus.sparse_reconstruction.value,
                         ReconstructionStatus.fvdb_reconstruction.value,
+                        ReconstructionStatus.grut_reconstruction.value,
                         ReconstructionStatus.exporting.value,
                     ]
                 )

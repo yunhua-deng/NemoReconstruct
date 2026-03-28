@@ -16,6 +16,7 @@ export type ReconstructionDetail = {
   processing_params: ReconstructionParams;
   artifact_ply_url: string | null;
   artifact_usdz_url: string | null;
+  artifact_collision_mesh_url: string | null;
   artifact_bundle_url: string | null;
   artifact_log_url: string | null;
   artifact_metadata_url: string | null;
@@ -34,6 +35,7 @@ export type ReconstructionArtifacts = {
   source_video_url: string;
   splat_ply_url: string | null;
   scene_usdz_url: string | null;
+  collision_mesh_url: string | null;
   sim_bundle_url: string | null;
   run_log_url: string | null;
   metadata_url: string | null;
@@ -55,10 +57,20 @@ export type ReconstructionParams = {
   sequential_matcher_overlap?: number;
   colmap_mapper_type?: string;
   colmap_max_num_features?: number;
+  reconstruction_backend?: string;
   fvdb_max_epochs?: number;
   fvdb_sh_degree?: number;
   fvdb_image_downsample_factor?: number;
+  grut_n_iterations?: number;
+  grut_render_method?: string;
+  grut_strategy?: string;
+  grut_downsample_factor?: number;
   splat_only_mode?: boolean;
+  collision_mesh_enabled?: boolean;
+  collision_mesh_method?: string;
+  collision_mesh_target_faces?: number;
+  collision_mesh_alpha?: number;
+  collision_mesh_downsample?: number;
 };
 
 type RequestOptions = Omit<RequestInit, "body"> & {

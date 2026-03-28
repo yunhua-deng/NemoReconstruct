@@ -144,6 +144,8 @@ export function startWorkflow(
   sceneName: string,
   maxIterations: number = 3,
   onProgress?: (pct: number) => void,
+  acceptPsnrThreshold: number = 25.0,
+  acceptSsimThreshold: number = 0.85,
 ): Promise<WorkflowDetail> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -168,6 +170,8 @@ export function startWorkflow(
     form.append("file", file);
     form.append("scene_name", sceneName);
     form.append("max_iterations", String(maxIterations));
+    form.append("accept_psnr_threshold", String(acceptPsnrThreshold));
+    form.append("accept_ssim_threshold", String(acceptSsimThreshold));
     xhr.send(form);
   });
 }

@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "NemoReconstruct",
-  description: "MOV to fVDB reconstruction for Isaac Sim workflows.",
+  description: "Video to 3D Gaussian reconstruction (NuRec USDZ + PLY) for Omniverse and Isaac Sim workflows.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {

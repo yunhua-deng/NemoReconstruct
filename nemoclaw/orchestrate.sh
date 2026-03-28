@@ -29,7 +29,9 @@ WORKFLOW_ID="${WORKFLOW_ID:-}"
 VIDEO_PATH="${1:?Usage: orchestrate.sh <video_path> <scene_name> [max_iterations]}"
 SCENE_NAME="${2:?Usage: orchestrate.sh <video_path> <scene_name> [max_iterations]}"
 MAX_ITERATIONS="${3:-3}"
-TIMEOUT="${AGENT_TIMEOUT:-300}"
+TIMEOUT="${AGENT_TIMEOUT:-1200}"
+ACCEPT_PSNR="${ACCEPT_PSNR_THRESHOLD:-25.0}"
+ACCEPT_SSIM="${ACCEPT_SSIM_THRESHOLD:-0.85}"
 
 # Validate inputs
 if [[ ! -f "$VIDEO_PATH" ]]; then
@@ -46,6 +48,8 @@ echo "============================================"
 echo " Video:          $VIDEO_PATH"
 echo " Scene:          $SCENE_NAME"
 echo " Max iterations: $MAX_ITERATIONS"
+echo " PSNR threshold: $ACCEPT_PSNR"
+echo " SSIM threshold: $ACCEPT_SSIM"
 echo " API:            $API_URL"
 echo "============================================"
 echo ""
@@ -67,17 +71,27 @@ run_agent() {
     local message="$2"
     local prompt_file="$3"
 
-    # Copy video into repo dir so single --upload covers everything
-    local video_in_repo="$REPO_DIR/$(basename "$VIDEO_PATH")"
-    if [[ ! -f "$video_in_repo" ]]; then
-        cp "$VIDEO_PATH" "$video_in_repo"
-        COPIED_VIDEO="$video_in_repo"
-    fi
+    # Build a lightweight staging dir with only what the sandbox needs:
+    # the nemoclaw config files and the video. This avoids uploading the
+    # entire repo (backend/storage alone is multi-GB).
+    local stage_dir
+    stage_dir=$(mktemp -d)
+    # Clean up staging dir on return
+    trap "rm -rf '$stage_dir'" RETURN
 
+    cp -a "$SCRIPT_DIR" "$stage_dir/nemoclaw"
+    ln -s "$VIDEO_PATH" "$stage_dir/$(basename "$VIDEO_PATH")"
+
+    # Use 'timeout' as a hard kill-switch since openclaw's --timeout is unreliable.
+    # Allow TIMEOUT for agent work + 120s overhead for upload/bootstrap.
+    local hard_timeout=$(( TIMEOUT + 120 ))
+
+    timeout --signal=KILL "${hard_timeout}s" \
     openshell sandbox create \
         --from openclaw \
         --policy "$POLICY" \
-        --upload "$REPO_DIR:/sandbox/NemoReconstruct" \
+        --no-git-ignore \
+        --upload "$stage_dir:/sandbox/NemoReconstruct" \
         -- bash -c "
 mkdir -p /sandbox/.openclaw
 cp /sandbox/NemoReconstruct/nemoclaw/sandbox-openclaw.json /sandbox/.openclaw/openclaw.json
@@ -86,7 +100,37 @@ cd /sandbox/NemoReconstruct
 openclaw agent --local --session-id $session_id \
     --message \"$(echo "$message" | sed 's/"/\\"/g')\" \
     --json --timeout $TIMEOUT
-"
+" || true
+}
+
+# Wait for reconstruction to reach a terminal state (completed or failed).
+# The runner agent may time out before the pipeline finishes training, so
+# the orchestrator must poll independently before proceeding to the evaluator.
+wait_for_completion() {
+    local reconstruction_id="$1"
+    local poll_interval="${2:-30}"
+    local max_wait="${3:-2400}"  # 40 minutes default
+    local elapsed=0
+
+    while (( elapsed < max_wait )); do
+        local status
+        status=$(curl -sf "${API_URL}/api/v1/reconstructions/${reconstruction_id}/status" 2>/dev/null \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])" 2>/dev/null || echo "unknown")
+
+        if [[ "$status" == "completed" || "$status" == "failed" ]]; then
+            echo "[orchestrator] Pipeline finished with status: $status (waited ${elapsed}s)"
+            echo "$status"
+            return 0
+        fi
+
+        echo "[orchestrator] Pipeline still running (status=$status, ${elapsed}s elapsed)..."
+        sleep "$poll_interval"
+        (( elapsed += poll_interval ))
+    done
+
+    echo "[orchestrator] WARNING: Pipeline did not finish within ${max_wait}s"
+    echo "timeout"
+    return 1
 }
 
 # Extract reconstruction ID from agent output
@@ -243,8 +287,11 @@ extract_params() {
     python3 -c "
 import sys, json, re
 
-VALID_KEYS = {'frame_rate','sequential_matcher_overlap','fvdb_max_epochs',
-              'fvdb_sh_degree','fvdb_image_downsample_factor','splat_only_mode'}
+VALID_KEYS = {'frame_rate','sequential_matcher_overlap','colmap_mapper_type',
+              'colmap_max_num_features','reconstruction_backend',
+              'fvdb_max_epochs','fvdb_sh_degree','fvdb_image_downsample_factor',
+              'grut_n_iterations','grut_render_method','grut_strategy',
+              'grut_downsample_factor','splat_only_mode'}
 text = sys.stdin.read()
 
 # Strip markdown code fences
@@ -332,7 +379,7 @@ VIDEO_BASENAME="$(basename "$VIDEO_PATH")"
 VIDEO_EXT="${VIDEO_BASENAME##*.}"
 SANDBOX_VIDEO="/sandbox/NemoReconstruct/${VIDEO_BASENAME}"
 
-RUNNER_MSG="Check the backend health at ${API_URL}. Then upload the video at ${SANDBOX_VIDEO} with name '${SCENE_NAME}' using curl to the API at ${API_URL}. Use these form fields: file=@${SANDBOX_VIDEO}, name=${SCENE_NAME}, fvdb_max_epochs=${INITIAL_EPOCHS:-5}, fvdb_image_downsample_factor=${INITIAL_DOWNSAMPLE:-10}, frame_rate=${INITIAL_FRAME_RATE:-1.0}, splat_only_mode=true. Poll the status every 15 seconds until it completes or fails. Report the reconstruction ID and final status."
+RUNNER_MSG="Check the backend health at ${API_URL}. Then upload the video at ${SANDBOX_VIDEO} with name '${SCENE_NAME}' using curl to the API at ${API_URL}. Use these form fields: file=@${SANDBOX_VIDEO}, name=${SCENE_NAME}, reconstruction_backend=${INITIAL_BACKEND:-3dgrut}, grut_n_iterations=${INITIAL_GRUT_ITERS:-5000}, grut_downsample_factor=${INITIAL_GRUT_DS:-4}, frame_rate=${INITIAL_FRAME_RATE:-1.0}, splat_only_mode=${INITIAL_SPLAT_ONLY:-false}. After uploading, poll the status using a shell loop: run 'while true; do sleep 30; curl -s ${API_URL}/api/v1/reconstructions/<ID>/status; done' and wait for it to show completed or failed. Report the reconstruction ID and final status."
 
 echo "[orchestrator] Starting Runner agent..."
 echo ""
@@ -355,13 +402,20 @@ echo ""
 echo "[orchestrator] Reconstruction ID: $RECONSTRUCTION_ID"
 update_workflow "{\"reconstruction_id\":\"${RECONSTRUCTION_ID}\",\"current_step\":\"waiting for reconstruction\"}"
 
-# Check if the job actually completed
-JOB_STATUS=$(curl -sf "${API_URL}/api/v1/reconstructions/${RECONSTRUCTION_ID}/status" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])" 2>/dev/null || echo "unknown")
+# Wait for the pipeline to actually reach a terminal state.
+# The runner agent may time out before training completes.
+JOB_STATUS=$(wait_for_completion "$RECONSTRUCTION_ID" 30 2400 | tail -1)
 echo "[orchestrator] Job status: $JOB_STATUS"
 
 if [[ "$JOB_STATUS" == "failed" ]]; then
     echo "[orchestrator] Initial run failed. Check the run log for diagnostics."
     update_workflow '{"status":"failed","error_message":"Initial reconstruction failed"}'
+    exit 1
+fi
+
+if [[ "$JOB_STATUS" == "timeout" ]]; then
+    echo "[orchestrator] Initial run timed out waiting for pipeline. Stopping."
+    update_workflow '{"status":"failed","error_message":"Pipeline did not complete within timeout"}'
     exit 1
 fi
 
@@ -372,7 +426,7 @@ for ((i=1; i<=MAX_ITERATIONS; i++)); do
     echo " Evaluation $i / $MAX_ITERATIONS"
     echo "============================================"
 
-    EVAL_MSG="Evaluate reconstruction ${RECONSTRUCTION_ID}. Use curl to call the API at ${API_URL}. Fetch the reconstruction details from /api/v1/reconstructions/${RECONSTRUCTION_ID} and the training metrics from /api/v1/reconstructions/${RECONSTRUCTION_ID}/metrics. Also fetch the iteration history from /api/v1/reconstructions/${RECONSTRUCTION_ID}/iterations to see what parameters and metrics each previous iteration produced — use this to avoid repeating failed approaches and to identify improvement trends. Analyze the quality. Your final output MUST be exactly one line of JSON like: {\"verdict\": \"ACCEPT\", \"reason\": \"...\"} or {\"verdict\": \"ITERATE\", \"reason\": \"...\", \"params\": {\"fvdb_max_epochs\": 20}}. Use ACCEPT if loss < 0.25 and SSIM > 0.85, otherwise ITERATE with suggested param changes."
+    EVAL_MSG="Evaluate reconstruction ${RECONSTRUCTION_ID}. Use curl to call the API at ${API_URL}. Fetch the reconstruction details from /api/v1/reconstructions/${RECONSTRUCTION_ID} and the training metrics from /api/v1/reconstructions/${RECONSTRUCTION_ID}/metrics. Also fetch the iteration history from /api/v1/reconstructions/${RECONSTRUCTION_ID}/iterations to see what parameters and metrics each previous iteration produced — use this to avoid repeating failed approaches and to identify improvement trends. Analyze the quality. Your final output MUST be exactly one line of JSON like: {\"verdict\": \"ACCEPT\", \"reason\": \"...\"} or {\"verdict\": \"ITERATE\", \"reason\": \"...\", \"params\": {\"fvdb_max_epochs\": 20}}. Use ACCEPT if quality is sufficient (for 3DGRUT: psnr > ${ACCEPT_PSNR} and ssim > ${ACCEPT_SSIM}; for fVDB: loss < 0.25 and ssimloss > ${ACCEPT_SSIM}), otherwise ITERATE with suggested param changes."
 
     echo "[orchestrator] Starting Evaluator agent..."
     echo ""
@@ -445,7 +499,7 @@ for ((i=1; i<=MAX_ITERATIONS; i++)); do
     echo " Iteration $((i+1)): Retry with new parameters"
     echo "============================================"
 
-    RETRY_MSG="Retry reconstruction ${RECONSTRUCTION_ID} with new parameters. Use curl to POST to ${API_URL}/api/v1/reconstructions/${RECONSTRUCTION_ID}/retry with body: {\"params\": ${NEW_PARAMS}}. Then poll the status every 15 seconds until it completes or fails. Report the final status."
+    RETRY_MSG="Retry reconstruction ${RECONSTRUCTION_ID} with new parameters. Use curl to POST to ${API_URL}/api/v1/reconstructions/${RECONSTRUCTION_ID}/retry with body: {\"params\": ${NEW_PARAMS}}. After posting, poll the status using a shell loop: run 'while true; do sleep 30; STATUS=\$(curl -s ${API_URL}/api/v1/reconstructions/${RECONSTRUCTION_ID}/status); echo \$STATUS; echo \$STATUS | grep -q '\"completed\"\|\"failed\"' && break; done' and wait for completion. Report the final status."
 
     echo "[orchestrator] Starting Runner agent (retry)..."
     echo ""
@@ -455,14 +509,20 @@ for ((i=1; i<=MAX_ITERATIONS; i++)); do
     RETRY_OUTPUT=$(run_agent "runner-iter-$((i+1))" "$RETRY_MSG" "runner_prompt.md" 2>&1)
     echo "$RETRY_OUTPUT"
 
-    # Check job status
-    JOB_STATUS=$(curl -sf "${API_URL}/api/v1/reconstructions/${RECONSTRUCTION_ID}/status" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])" 2>/dev/null || echo "unknown")
+    # Wait for the pipeline to finish (agent may time out before training ends)
+    JOB_STATUS=$(wait_for_completion "$RECONSTRUCTION_ID" 30 2400 | tail -1)
     echo ""
     echo "[orchestrator] Job status after retry: $JOB_STATUS"
 
     if [[ "$JOB_STATUS" == "failed" ]]; then
         echo "[orchestrator] Retry failed. Stopping."
         update_workflow '{"status":"failed","error_message":"Retry reconstruction failed"}'
+        break
+    fi
+
+    if [[ "$JOB_STATUS" == "timeout" ]]; then
+        echo "[orchestrator] Retry timed out waiting for pipeline. Stopping."
+        update_workflow '{"status":"failed","error_message":"Retry pipeline did not complete within timeout"}'
         break
     fi
 done

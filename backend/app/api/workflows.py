@@ -29,6 +29,8 @@ def serialize_workflow(w: Workflow) -> WorkflowDetail:
         current_step=w.current_step,
         iteration=w.iteration,
         max_iterations=w.max_iterations,
+        accept_psnr_threshold=w.accept_psnr_threshold,
+        accept_ssim_threshold=w.accept_ssim_threshold,
         last_verdict=w.last_verdict,
         last_reason=w.last_reason,
         reconstruction_id=w.reconstruction_id,
@@ -58,6 +60,8 @@ def start_workflow(
     file: UploadFile = File(...),
     scene_name: str = Form(...),
     max_iterations: int = Form(3),
+    accept_psnr_threshold: float = Form(25.0),
+    accept_ssim_threshold: float = Form(0.85),
     db: Session = Depends(get_db),
 ) -> WorkflowDetail:
     suffix = Path(file.filename or "upload.mov").suffix.lower()
@@ -70,6 +74,8 @@ def start_workflow(
         video_path="",
         status="pending",
         max_iterations=max_iterations,
+        accept_psnr_threshold=accept_psnr_threshold,
+        accept_ssim_threshold=accept_ssim_threshold,
     )
     db.add(w)
     db.commit()
@@ -103,6 +109,8 @@ def start_workflow(
         "WORKFLOW_ID": w.id,
         "WORKFLOW_API_URL": f"http://127.0.0.1:{settings.api_prefix.split(':')[-1] if ':' in settings.api_prefix else '8010'}",
         "AGENT_TIMEOUT": "600",
+        "ACCEPT_PSNR_THRESHOLD": str(w.accept_psnr_threshold),
+        "ACCEPT_SSIM_THRESHOLD": str(w.accept_ssim_threshold),
     }
 
     proc_env = os.environ.copy()
