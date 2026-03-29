@@ -358,8 +358,10 @@ def get_reconstruction_status(reconstruction_id: str, db: Session = Depends(get_
 @router.get("/reconstructions/{reconstruction_id}/artifacts", response_model=ReconstructionArtifacts)
 def get_reconstruction_artifacts(reconstruction_id: str, db: Session = Depends(get_db)) -> ReconstructionArtifacts:
     reconstruction = get_reconstruction_or_404(db, reconstruction_id)
+    source_video_path = reconstruction.source_video_path
+    has_source_video = source_video_path and Path(source_video_path).is_file()
     return ReconstructionArtifacts(
-        source_video_url=build_download_url(reconstruction.id, "source_video"),
+        source_video_url=build_download_url(reconstruction.id, "source_video") if has_source_video else None,
         splat_ply_url=build_download_url(reconstruction.id, "splat_ply") if reconstruction.artifact_ply_path else None,
         scene_usdz_url=build_download_url(reconstruction.id, "scene_usdz") if reconstruction.artifact_usdz_path else None,
         collision_mesh_url=build_download_url(reconstruction.id, "collision_mesh") if reconstruction.artifact_collision_mesh_path else None,
@@ -383,6 +385,8 @@ def download_artifact(reconstruction_id: str, artifact: str, db: Session = Depen
     path = Path(artifact_path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Artifact file missing on disk")
+    if path.is_dir():
+        raise HTTPException(status_code=404, detail="Artifact is a directory (dataset source), not downloadable")
 
     media_type = None
     if artifact == "scene_usdz":
@@ -520,6 +524,7 @@ def get_iteration_history(reconstruction_id: str, db: Session = Depends(get_db))
             iteration=rec.iteration,
             params=params,
             loss=rec.loss,
+            psnr=rec.psnr,
             ssim=rec.ssim,
             num_gaussians=rec.num_gaussians,
             verdict=rec.verdict,

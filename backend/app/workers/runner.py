@@ -37,6 +37,7 @@ class ReconstructionRunner:
                         ReconstructionStatus.fvdb_reconstruction.value,
                         ReconstructionStatus.grut_reconstruction.value,
                         ReconstructionStatus.exporting.value,
+                        ReconstructionStatus.generating_collision_mesh.value,
                     ]
                 )
             )

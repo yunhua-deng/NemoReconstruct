@@ -88,7 +88,7 @@ class ReconstructionStatusResponse(BaseModel):
 
 
 class ReconstructionArtifacts(BaseModel):
-    source_video_url: str
+    source_video_url: str | None = None
     splat_ply_url: str | None = None
     scene_usdz_url: str | None = None
     collision_mesh_url: str | None = None
@@ -139,6 +139,7 @@ class IterationSummary(BaseModel):
     iteration: int
     params: ReconstructionParams = Field(default_factory=ReconstructionParams)
     loss: float | None = None
+    psnr: float | None = None
     ssim: float | None = None
     num_gaussians: int | None = None
     verdict: str | None = None

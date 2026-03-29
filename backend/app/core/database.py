@@ -63,3 +63,9 @@ def ensure_runtime_schema() -> None:
             CREATE INDEX IF NOT EXISTS ix_iteration_records_reconstruction_id
             ON iteration_records (reconstruction_id)
         """))
+
+        # Add psnr column if missing (added after initial schema)
+        iter_rows = conn.execute(text("PRAGMA table_info(iteration_records)")).mappings().all()
+        iter_columns = {row["name"] for row in iter_rows}
+        if "psnr" not in iter_columns:
+            conn.execute(text("ALTER TABLE iteration_records ADD COLUMN psnr FLOAT"))

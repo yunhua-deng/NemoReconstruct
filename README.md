@@ -5,6 +5,8 @@ A fully local Physical AI pipeline — upload a video, get an Omniverse-ready **
 The pipeline uses **NemoClaw** as the agentic orchestrator, **3DGRUT** for neural Gaussian reconstruction, and exports to the **Omniverse NuRec** format for physics simulation and collision visualization in Isaac Sim.
 
 > **This repo is a template.** The [setup guide](docs/NEMOCLAW_SETUP.md) shows how to pair NemoClaw + OpenShell with **any** repo or API — NemoReconstruct is just the example project.
+>
+> **Walkthrough video:** [Watch the full setup on YouTube](https://www.youtube.com/watch?v=CGx_CR3WCyQ)
 
 ```
 Video → ffmpeg → COLMAP → 3DGRUT → NuRec USDZ + PLY

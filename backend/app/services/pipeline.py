@@ -462,6 +462,7 @@ def save_iteration_snapshot(db: Session, reconstruction: Reconstruction, paths: 
         metrics_json=json.dumps(metrics_summary) if metrics_summary else None,
         ply_path=ply_dest,
         loss=metrics_summary.get("reconstruct/loss"),
+        psnr=metrics_summary.get("reconstruct/psnr"),
         ssim=metrics_summary.get("reconstruct/ssim"),
         num_gaussians=int(metrics_summary["reconstruct/num_gaussians"]) if "reconstruct/num_gaussians" in metrics_summary else None,
         started_at=reconstruction.started_at,
@@ -582,7 +583,7 @@ def process_reconstruction_job(db: Session, reconstruction_id: str) -> None:
             grut_env = build_3dgrut_env()
         else:
             frgs_bin = resolve_frgs_binary()
-            frgs_env = build_fvdb_env() if Path(frgs_bin).is_file() and "envs" in Path(frgs_bin).parts else None
+            frgs_env = build_fvdb_env()
 
         if skip_preprocessing:
             reconstruction.frame_count = count_frames(paths.images_dir)

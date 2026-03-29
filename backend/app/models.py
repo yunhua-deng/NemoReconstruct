@@ -96,6 +96,7 @@ class IterationRecord(Base):
     verdict: Mapped[str | None] = mapped_column(String(64), nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     loss: Mapped[float | None] = mapped_column(Float, nullable=True)
+    psnr: Mapped[float | None] = mapped_column(Float, nullable=True)
     ssim: Mapped[float | None] = mapped_column(Float, nullable=True)
     num_gaussians: Mapped[int | None] = mapped_column(Integer, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

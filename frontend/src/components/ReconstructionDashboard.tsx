@@ -399,6 +399,12 @@ function IterationTimeline({ history }: { history: IterationHistoryResponse }) {
                     {fmtDelta(iter.loss, prev?.loss ?? null) ? <span className="metric-diff">{fmtDelta(iter.loss, prev?.loss ?? null)}</span> : null}
                   </span>
                 ) : null}
+                {iter.psnr != null ? (
+                  <span className={deltaClass(iter.psnr, prev?.psnr ?? null, false)}>
+                    PSNR: {iter.psnr.toFixed(2)} dB
+                    {fmtDelta(iter.psnr, prev?.psnr ?? null) ? <span className="metric-diff">{fmtDelta(iter.psnr, prev?.psnr ?? null)}</span> : null}
+                  </span>
+                ) : null}
                 {iter.ssim != null ? (
                   <span className={deltaClass(iter.ssim, prev?.ssim ?? null, false)}>
                     SSIM: {iter.ssim.toFixed(4)}
@@ -501,45 +507,6 @@ function DetailPanel({
             <MetricValue label="Gaussians" value={s["reconstruct/num_gaussians"]?.toLocaleString() ?? "\u2014"} />
             <MetricValue label="GPU Mem" value={s["reconstruct/mem_allocated"] != null ? `${s["reconstruct/mem_allocated"].toFixed(2)} GB` : "\u2014"} />
             <MetricValue label="SH Degree" value={s["reconstruct/sh_degree"]?.toFixed(0) ?? "\u2014"} />
-          </div>
-        </div>
-      ) : null}
-
-      {/* Simulation-ready downloads */}
-      {(item.artifact_usdz_url || item.artifact_collision_mesh_url || item.artifact_ply_url) ? (
-        <div className="detail-section detail-full-width">
-          <h3>Simulation-Ready Assets</h3>
-          <div className="sim-assets">
-            {item.artifact_usdz_url ? (
-              <a className="sim-asset-btn sim-asset-usdz" href={absoluteArtifactUrl(item.artifact_usdz_url) ?? undefined} download onClick={(e) => e.stopPropagation()}>
-                <span className="sim-asset-icon">&#x1F30D;</span>
-                <span className="sim-asset-info">
-                  <span className="sim-asset-name">NuRec USDZ</span>
-                  <span className="sim-asset-desc">Visual asset for Omniverse / Isaac Sim</span>
-                </span>
-                <span className="sim-asset-dl">&#x2B07;</span>
-              </a>
-            ) : null}
-            {item.artifact_collision_mesh_url ? (
-              <a className="sim-asset-btn sim-asset-collision" href={absoluteArtifactUrl(item.artifact_collision_mesh_url) ?? undefined} download onClick={(e) => e.stopPropagation()}>
-                <span className="sim-asset-icon">&#x1F9F1;</span>
-                <span className="sim-asset-info">
-                  <span className="sim-asset-name">Collision Mesh (OBJ)</span>
-                  <span className="sim-asset-desc">Physics collision geometry for Isaac Sim</span>
-                </span>
-                <span className="sim-asset-dl">&#x2B07;</span>
-              </a>
-            ) : null}
-            {item.artifact_ply_url ? (
-              <a className="sim-asset-btn sim-asset-ply" href={absoluteArtifactUrl(item.artifact_ply_url) ?? undefined} download onClick={(e) => e.stopPropagation()}>
-                <span className="sim-asset-icon">&#x2B50;</span>
-                <span className="sim-asset-info">
-                  <span className="sim-asset-name">Gaussian Splat (PLY)</span>
-                  <span className="sim-asset-desc">Raw 3D Gaussian point cloud</span>
-                </span>
-                <span className="sim-asset-dl">&#x2B07;</span>
-              </a>
-            ) : null}
           </div>
         </div>
       ) : null}

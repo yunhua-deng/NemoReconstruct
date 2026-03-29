@@ -130,6 +130,22 @@ Given the current results, suggest parameter changes:
 | Collision mesh doesn't fit scene | Use `collision_mesh_method` = `alpha` with higher `collision_mesh_alpha` |
 | No collision mesh needed | Set `collision_mesh_enabled` to false |
 
+## Backend-Specific Parameters
+
+When suggesting parameter changes, ONLY include parameters relevant to the active reconstruction backend.
+
+**Common parameters** (always valid for any backend):
+- `frame_rate`, `sequential_matcher_overlap`, `colmap_mapper_type`, `colmap_max_num_features`, `splat_only_mode`
+- `collision_mesh_enabled`, `collision_mesh_method`, `collision_mesh_target_faces`, `collision_mesh_alpha`, `collision_mesh_downsample`
+
+**3DGRUT-only parameters** (only when backend is `3dgrut`):
+- `grut_n_iterations`, `grut_render_method`, `grut_strategy`, `grut_downsample_factor`
+
+**fVDB-only parameters** (only when backend is `fvdb`):
+- `fvdb_max_epochs`, `fvdb_sh_degree`, `fvdb_image_downsample_factor`
+
+**CRITICAL:** Do NOT suggest fVDB parameters (e.g., `fvdb_max_epochs`) when the current backend is `3dgrut`, and do NOT suggest 3DGRUT parameters (e.g., `grut_n_iterations`) when the current backend is `fvdb`. The only exception is when you are **switching backends** by including `reconstruction_backend` in the params — in that case, include parameters for the NEW backend only.
+
 ## Output Format
 
 Your response MUST end with a JSON block in exactly this format:
@@ -139,17 +155,22 @@ If the reconstruction is good enough:
 {"verdict": "ACCEPT", "reason": "Final loss 0.18 with SSIM 0.91, quality is sufficient"}
 ```
 
-If another iteration is needed:
+If another iteration is needed (3DGRUT backend — only use grut_* params):
 ```json
-{"verdict": "ITERATE", "reason": "Loss still decreasing, needs more training", "params": {"grut_n_iterations": 60000, "grut_downsample_factor": 2}}
+{"verdict": "ITERATE", "reason": "PSNR still improving, needs more training", "params": {"grut_n_iterations": 60000, "grut_downsample_factor": 2}}
 ```
 
-If switching to fVDB:
+If another iteration is needed (fVDB backend — only use fvdb_* params):
+```json
+{"verdict": "ITERATE", "reason": "Loss still decreasing, needs more epochs", "params": {"fvdb_max_epochs": 80, "fvdb_image_downsample_factor": 2}}
+```
+
+If switching from 3DGRUT to fVDB (drop all grut_* params, use fvdb_* params):
 ```json
 {"verdict": "ITERATE", "reason": "3DGRUT struggling with this scene, trying fVDB backend", "params": {"reconstruction_backend": "fvdb", "fvdb_max_epochs": 80, "fvdb_image_downsample_factor": 4}}
 ```
 
-If switching to 3DGRUT:
+If switching from fVDB to 3DGRUT (drop all fvdb_* params, use grut_* params):
 ```json
 {"verdict": "ITERATE", "reason": "fVDB plateau at high loss, trying 3DGRUT ray tracing backend", "params": {"reconstruction_backend": "3dgrut", "grut_n_iterations": 30000, "grut_downsample_factor": 2}}
 ```
@@ -159,7 +180,9 @@ The `params` field should ONLY include parameters that need to change from the c
 ## Rules
 
 1. Always fetch both the reconstruction details AND the metrics before making a judgment.
-2. Base your verdict on data, not assumptions.
-3. Be conservative — don't change too many parameters at once. Change 1-2 at a time.
-4. After 3 iterations, if quality is still poor, ACCEPT with a note explaining what was tried.
-5. Keep your analysis concise — focus on the key metrics and the reasoning for your parameter changes.
+2. Check the `reconstruction_backend` in `processing_params` — use ONLY metrics and parameters relevant to that backend.
+3. Base your verdict on data, not assumptions.
+4. Be conservative — don't change too many parameters at once. Change 1-2 at a time.
+5. NEVER mix parameters from different backends. For 3DGRUT, only suggest `grut_*` params. For fVDB, only suggest `fvdb_*` params.
+6. After 3 iterations, if quality is still poor, ACCEPT with a note explaining what was tried.
+7. Keep your analysis concise — focus on the key metrics and the reasoning for your parameter changes.

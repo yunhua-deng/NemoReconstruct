@@ -131,6 +131,7 @@ export type IterationSummary = {
   iteration: number;
   params: ReconstructionParams;
   loss: number | null;
+  psnr: number | null;
   ssim: number | null;
   num_gaussians: number | null;
   verdict: string | null;

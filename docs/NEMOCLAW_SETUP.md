@@ -53,12 +53,12 @@ These steps set up the AI agent infrastructure. Do this once — it works for an
 
 ## Step 1 — Install Prerequisites
 
-You need Docker, Node.js, Python, and Git installed.
+You need Docker, Python, and Git installed. Node.js is only needed if you plan to run the frontend dashboard.
 
 ```bash
 # Check what you have
 docker --version          # Docker 24+ required
-node --version            # Node.js 18+ required
+node --version            # Node.js 18+ (optional — for frontend only)
 python3 --version         # Python 3.10+ required
 git --version             # Git 2.x
 uv --version              # uv (Python package installer)
@@ -130,23 +130,7 @@ curl -s http://localhost:11434/v1/models | python3 -m json.tool
 
 ---
 
-## Step 3 — Install OpenClaw
-
-OpenClaw is the agent runtime. Install it globally via npm:
-
-```bash
-npm install -g openclaw
-```
-
-Verify:
-```bash
-openclaw --version
-# Should show 2026.x.x
-```
-
----
-
-## Step 4 — Install OpenShell
+## Step 3 — Install OpenShell
 
 OpenShell provides the sandbox runtime and inference routing:
 
@@ -168,7 +152,7 @@ For more details, see [build.nvidia.com/spark/openshell](https://build.nvidia.co
 
 ---
 
-## Step 5 — Start the OpenShell Gateway
+## Step 4 — Start the OpenShell Gateway
 
 The gateway manages sandboxes and routes inference requests:
 
@@ -186,7 +170,7 @@ openshell status
 
 ---
 
-## Step 6 — Register the Ollama Provider
+## Step 5 — Register the Ollama Provider
 
 Tell the OpenShell gateway where to find your local LLM:
 
@@ -211,7 +195,7 @@ openshell provider get ollama
 
 ---
 
-## Step 7 — Set Inference Routing
+## Step 6 — Set Inference Routing
 
 Map the model name to the Ollama provider so sandboxes know where to send requests:
 
@@ -229,7 +213,7 @@ openshell inference get
 
 ---
 
-## Step 8 — Test Inference from a Sandbox
+## Step 7 — Test Inference from a Sandbox
 
 This is the moment of truth — does `inference.local` inside a sandbox actually reach Ollama?
 
@@ -260,7 +244,7 @@ You need three things:
 
 ---
 
-## Step 9 — Find Your Host IP
+## Step 8 — Find Your Host IP
 
 Sandboxes reach your host machine through the Docker cluster network. Find the gateway IP:
 
@@ -273,7 +257,7 @@ Use this IP (not `localhost`) whenever the sandbox needs to reach a service on y
 
 ---
 
-## Step 10 — Start Your Service
+## Step 9 — Start Your Service
 
 If your project has an API or service, start it and bind to `0.0.0.0`:
 
@@ -297,7 +281,7 @@ curl -s http://localhost:YOUR_PORT/health   # or whatever your health endpoint i
 
 ---
 
-## Step 11 — Create a Sandbox Network Policy
+## Step 10 — Create a Sandbox Network Policy
 
 The sandbox is completely locked down by default. Create a policy file to allow the agent to talk to your service.
 
@@ -333,7 +317,7 @@ network_policies:
   my_service:
     name: my-service
     endpoints:
-      - host: 172.20.0.1        # <-- Host IP from Step 9
+      - host: 172.20.0.1        # <-- Host IP from Step 8
         port: 8010               # <-- Your service port
         protocol: tcp
         enforcement: enforce
@@ -364,7 +348,7 @@ network_policies:
 
 ---
 
-## Step 12 — Create an OpenClaw Config
+## Step 11 — Create an OpenClaw Config
 
 Create a file called `sandbox-openclaw.json` in your project:
 
@@ -426,7 +410,7 @@ Create a file called `sandbox-openclaw.json` in your project:
 
 ---
 
-## Step 13 — Run the Agent
+## Step 12 — Run the Agent
 
 Upload your project into a sandbox and run the agent:
 
@@ -453,7 +437,7 @@ openclaw agent --local --session-id demo \
 | Flag | Purpose |
 |------|---------|
 | `--from openclaw` | Uses the community OpenClaw sandbox image |
-| `--policy sandbox-policy.yaml` | Applies your network policy (from Step 11) |
+| `--policy sandbox-policy.yaml` | Applies your network policy (from Step 10) |
 | `--upload "$PWD:/sandbox/my-project"` | Copies your repo into the sandbox at `/sandbox/my-project` |
 | `openclaw agent --local` | Runs the agent locally (no external cloud gateway) |
 | `--session-id demo` | Names the agent session |
@@ -468,7 +452,7 @@ openclaw agent --local --session-id demo \
 
 ---
 
-## Step 14 — Interactive Session (Optional)
+## Step 13 — Interactive Session (Optional)
 
 For a persistent shell where you can run multiple agent turns:
 
@@ -859,26 +843,23 @@ ollama pull glm-4.7-flash
 sudo systemctl edit ollama                          # Add: Environment="OLLAMA_HOST=0.0.0.0"
 sudo systemctl daemon-reload && sudo systemctl restart ollama
 
-# 2. Install OpenClaw
-npm install -g openclaw
-
-# 3. Install OpenShell
+# 2. Install OpenShell
 uv tool install openshell
 openshell --version                                 # Verify >= 0.0.16
 
-# 4. Start the gateway
+# 3. Start the gateway
 openshell gateway start --gpu
 
-# 5. Register Ollama as a provider
+# 4. Register Ollama as a provider
 openshell provider create --name ollama \
   --type openai \
   --credential OPENAI_API_KEY=empty \
   --config OPENAI_BASE_URL=http://host.openshell.internal:11434/v1
 
-# 6. Set inference routing
+# 5. Set inference routing
 openshell inference set --provider ollama --model glm-4.7-flash
 
-# 7. Test inference from a sandbox
+# 6. Test inference from a sandbox
 openshell sandbox create -- \
   curl -s https://inference.local/v1/chat/completions \
   --json '{"messages":[{"role":"user","content":"hello"}],"max_tokens":10}'

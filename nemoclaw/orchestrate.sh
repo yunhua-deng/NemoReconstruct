@@ -48,6 +48,16 @@ TIMEOUT="${AGENT_TIMEOUT:-1200}"
 ACCEPT_PSNR="${ACCEPT_PSNR_THRESHOLD:-25.0}"
 ACCEPT_SSIM="${ACCEPT_SSIM_THRESHOLD:-0.85}"
 
+# Track active reconstruction backend across iterations
+if [[ "$DATASET_MODE" == "true" ]]; then
+    CURRENT_BACKEND="${INITIAL_BACKEND:-fvdb}"
+else
+    CURRENT_BACKEND="${INITIAL_BACKEND:-3dgrut}"
+fi
+
+# Clean up OpenClaw persona scaffolds that get dropped into $PWD
+rm -f "$REPO_DIR"/{AGENTS,HEARTBEAT,IDENTITY,SOUL,TOOLS,USER}.md 2>/dev/null || true
+
 # Validate inputs
 if [[ "$DATASET_MODE" == "false" ]]; then
     if [[ ! -f "$VIDEO_PATH" ]]; then
@@ -305,16 +315,36 @@ update_workflow() {
         >/dev/null 2>&1 || true
 }
 
-# Extract suggested params JSON from evaluator output
+# Extract suggested params JSON from evaluator output.
+# Arg $1: current backend (3dgrut or fvdb) — used to filter out
+# params that belong to the wrong backend.
 extract_params() {
+    local current_backend="${1:-}"
     python3 -c "
 import sys, json, re
+
+current_backend = '${current_backend}'
 
 VALID_KEYS = {'frame_rate','sequential_matcher_overlap','colmap_mapper_type',
               'colmap_max_num_features','reconstruction_backend',
               'fvdb_max_epochs','fvdb_sh_degree','fvdb_image_downsample_factor',
               'grut_n_iterations','grut_render_method','grut_strategy',
               'grut_downsample_factor','splat_only_mode'}
+
+GRUT_ONLY = {'grut_n_iterations','grut_render_method','grut_strategy','grut_downsample_factor'}
+FVDB_ONLY = {'fvdb_max_epochs','fvdb_sh_degree','fvdb_image_downsample_factor'}
+
+def filter_for_backend(params):
+    if not current_backend:
+        return params
+    # If switching backends, scope to the NEW backend's params
+    target = params.get('reconstruction_backend', current_backend)
+    if target == '3dgrut':
+        return {k: v for k, v in params.items() if k not in FVDB_ONLY}
+    elif target == 'fvdb':
+        return {k: v for k, v in params.items() if k not in GRUT_ONLY}
+    return params
+
 text = sys.stdin.read()
 
 # Strip markdown code fences
@@ -355,6 +385,7 @@ for obj in list(objects):
 for obj in reversed(objects):
     if isinstance(obj.get('params'), dict):
         filtered = {k: v for k, v in obj['params'].items() if k in VALID_KEYS}
+        filtered = filter_for_backend(filtered)
         if filtered:
             print(json.dumps(filtered))
             sys.exit(0)
@@ -364,6 +395,7 @@ for obj in reversed(objects):
     for key in ('suggested_parameters', 'recommended_params', 'new_params', 'parameters'):
         if isinstance(obj.get(key), dict):
             filtered = {k: v for k, v in obj[key].items() if k in VALID_KEYS}
+            filtered = filter_for_backend(filtered)
             if filtered:
                 print(json.dumps(filtered))
                 sys.exit(0)
@@ -371,6 +403,7 @@ for obj in reversed(objects):
 # Strategy 3: find any JSON object that has valid param keys directly
 for obj in reversed(objects):
     filtered = {k: v for k, v in obj.items() if k in VALID_KEYS}
+    filtered = filter_for_backend(filtered)
     if filtered:
         print(json.dumps(filtered))
         sys.exit(0)
@@ -388,6 +421,7 @@ for key in VALID_KEYS:
         else:
             params[key] = int(val)
 if params:
+    params = filter_for_backend(params)
     print(json.dumps(params))
 else:
     print('{}')
@@ -400,14 +434,25 @@ echo "============================================"
 
 if [[ "$DATASET_MODE" == "true" ]]; then
     # Dataset mode: runner uses the from-dataset API
-    RUNNER_MSG="Check the backend health at ${API_URL}. Then start a reconstruction from the pre-existing dataset '${DATASET_NAME}' using curl to POST to ${API_URL}/api/v1/reconstructions/from-dataset. Use these form fields: dataset_name=${DATASET_NAME}, name=${SCENE_NAME}, reconstruction_backend=${INITIAL_BACKEND:-fvdb}. After posting, extract the reconstruction ID from the response. Then poll the status using a shell loop: run 'while true; do sleep 30; curl -s ${API_URL}/api/v1/reconstructions/<ID>/status; done' and wait for it to show completed or failed. Report the reconstruction ID and final status."
+    if [[ "$CURRENT_BACKEND" == "fvdb" ]]; then
+        BACKEND_PARAMS="reconstruction_backend=fvdb, fvdb_max_epochs=${INITIAL_FVDB_EPOCHS:-30}, fvdb_image_downsample_factor=${INITIAL_FVDB_DS:-4}"
+    else
+        BACKEND_PARAMS="reconstruction_backend=${CURRENT_BACKEND}, grut_n_iterations=${INITIAL_GRUT_ITERS:-5000}, grut_downsample_factor=${INITIAL_GRUT_DS:-4}"
+    fi
+    RUNNER_MSG="Check the backend health at ${API_URL}. Then start a reconstruction from the pre-existing dataset '${DATASET_NAME}' using curl to POST to ${API_URL}/api/v1/reconstructions/from-dataset. Use these form fields: dataset_name=${DATASET_NAME}, name=${SCENE_NAME}, ${BACKEND_PARAMS}. After posting, extract the reconstruction ID from the response. Then poll the status using a shell loop: run 'while true; do sleep 30; curl -s ${API_URL}/api/v1/reconstructions/<ID>/status; done' and wait for it to show completed or failed. Report the reconstruction ID and final status."
 else
     # Video mode: runner uploads the video file
     VIDEO_BASENAME="$(basename "$VIDEO_PATH")"
     VIDEO_EXT="${VIDEO_BASENAME##*.}"
     SANDBOX_VIDEO="/sandbox/NemoReconstruct/${VIDEO_BASENAME}"
 
-    RUNNER_MSG="Check the backend health at ${API_URL}. Then upload the video at ${SANDBOX_VIDEO} with name '${SCENE_NAME}' using curl to the API at ${API_URL}. Use these form fields: file=@${SANDBOX_VIDEO}, name=${SCENE_NAME}, reconstruction_backend=${INITIAL_BACKEND:-3dgrut}, grut_n_iterations=${INITIAL_GRUT_ITERS:-5000}, grut_downsample_factor=${INITIAL_GRUT_DS:-4}, frame_rate=${INITIAL_FRAME_RATE:-1.0}, splat_only_mode=${INITIAL_SPLAT_ONLY:-false}. After uploading, poll the status using a shell loop: run 'while true; do sleep 30; curl -s ${API_URL}/api/v1/reconstructions/<ID>/status; done' and wait for it to show completed or failed. Report the reconstruction ID and final status."
+    if [[ "$CURRENT_BACKEND" == "fvdb" ]]; then
+        BACKEND_PARAMS="reconstruction_backend=fvdb, fvdb_max_epochs=${INITIAL_FVDB_EPOCHS:-30}, fvdb_image_downsample_factor=${INITIAL_FVDB_DS:-4}"
+    else
+        BACKEND_PARAMS="reconstruction_backend=${CURRENT_BACKEND}, grut_n_iterations=${INITIAL_GRUT_ITERS:-5000}, grut_downsample_factor=${INITIAL_GRUT_DS:-4}"
+    fi
+
+    RUNNER_MSG="Check the backend health at ${API_URL}. Then upload the video at ${SANDBOX_VIDEO} with name '${SCENE_NAME}' using curl to the API at ${API_URL}. Use these form fields: file=@${SANDBOX_VIDEO}, name=${SCENE_NAME}, ${BACKEND_PARAMS}, frame_rate=${INITIAL_FRAME_RATE:-1.0}, splat_only_mode=${INITIAL_SPLAT_ONLY:-false}. After uploading, poll the status using a shell loop: run 'while true; do sleep 30; curl -s ${API_URL}/api/v1/reconstructions/<ID>/status; done' and wait for it to show completed or failed. Report the reconstruction ID and final status."
 fi
 
 echo "[orchestrator] Starting Runner agent..."
@@ -455,7 +500,14 @@ for ((i=1; i<=MAX_ITERATIONS; i++)); do
     echo " Evaluation $i / $MAX_ITERATIONS"
     echo "============================================"
 
-    EVAL_MSG="Evaluate reconstruction ${RECONSTRUCTION_ID}. Use curl to call the API at ${API_URL}. Fetch the reconstruction details from /api/v1/reconstructions/${RECONSTRUCTION_ID} and the training metrics from /api/v1/reconstructions/${RECONSTRUCTION_ID}/metrics. Also fetch the iteration history from /api/v1/reconstructions/${RECONSTRUCTION_ID}/iterations to see what parameters and metrics each previous iteration produced — use this to avoid repeating failed approaches and to identify improvement trends. Analyze the quality. Your final output MUST be exactly one line of JSON like: {\"verdict\": \"ACCEPT\", \"reason\": \"...\"} or {\"verdict\": \"ITERATE\", \"reason\": \"...\", \"params\": {\"fvdb_max_epochs\": 20}}. Use ACCEPT if quality is sufficient (for 3DGRUT: psnr > ${ACCEPT_PSNR} and ssim > ${ACCEPT_SSIM}; for fVDB: loss < 0.25 and ssimloss > ${ACCEPT_SSIM}), otherwise ITERATE with suggested param changes."
+    # Use a backend-appropriate example in the prompt
+    if [[ "$CURRENT_BACKEND" == "fvdb" ]]; then
+        ITERATE_EXAMPLE="{\"verdict\": \"ITERATE\", \"reason\": \"...\", \"params\": {\"fvdb_max_epochs\": 60}}"
+    else
+        ITERATE_EXAMPLE="{\"verdict\": \"ITERATE\", \"reason\": \"...\", \"params\": {\"grut_n_iterations\": 20000}}"
+    fi
+
+    EVAL_MSG="Evaluate reconstruction ${RECONSTRUCTION_ID}. The current reconstruction backend is '${CURRENT_BACKEND}'. Use curl to call the API at ${API_URL}. Fetch the reconstruction details from /api/v1/reconstructions/${RECONSTRUCTION_ID} and the training metrics from /api/v1/reconstructions/${RECONSTRUCTION_ID}/metrics. Also fetch the iteration history from /api/v1/reconstructions/${RECONSTRUCTION_ID}/iterations to see what parameters and metrics each previous iteration produced — use this to avoid repeating failed approaches and to identify improvement trends. Analyze the quality. IMPORTANT: Only suggest parameters relevant to the '${CURRENT_BACKEND}' backend. If the backend is '3dgrut', only use grut_* params and psnr/ssim metrics. If the backend is 'fvdb', only use fvdb_* params and loss/ssimloss metrics. Do NOT mix parameters from different backends. Your final output MUST be exactly one line of JSON like: {\"verdict\": \"ACCEPT\", \"reason\": \"...\"} or ${ITERATE_EXAMPLE}. Use ACCEPT if quality is sufficient (for 3DGRUT: psnr > ${ACCEPT_PSNR} and ssim > ${ACCEPT_SSIM}; for fVDB: loss < 0.25 and ssimloss > ${ACCEPT_SSIM}), otherwise ITERATE with suggested param changes."
 
     echo "[orchestrator] Starting Evaluator agent..."
     echo ""
@@ -516,9 +568,16 @@ for ((i=1; i<=MAX_ITERATIONS; i++)); do
         break
     fi
 
-    # Extract suggested parameters
-    NEW_PARAMS=$(echo "$EVAL_OUTPUT" | extract_params || echo "{}")
+    # Extract suggested parameters (filtered for current backend)
+    NEW_PARAMS=$(echo "$EVAL_OUTPUT" | extract_params "$CURRENT_BACKEND" || echo "{}")
     echo "[orchestrator] Suggested params: $NEW_PARAMS"
+
+    # Track backend switches across iterations
+    SWITCHED_BACKEND=$(echo "$NEW_PARAMS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('reconstruction_backend',''))" 2>/dev/null || true)
+    if [[ -n "$SWITCHED_BACKEND" ]]; then
+        echo "[orchestrator] Backend switching: $CURRENT_BACKEND -> $SWITCHED_BACKEND"
+        CURRENT_BACKEND="$SWITCHED_BACKEND"
+    fi
 
     # Save suggested params as notes
     save_notes "$RECONSTRUCTION_ID" "[Eval $i] Verdict: ${VERDICT}. Suggested params: ${NEW_PARAMS}. ${REASON}"
