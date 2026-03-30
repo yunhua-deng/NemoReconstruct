@@ -20,14 +20,16 @@ PIPELINE_INFO = {
     "name": "NemoReconstruct Pipeline",
     "description": "Video upload -> ffmpeg frame extraction -> COLMAP -> 3DGRUT (or fVDB) reconstruction -> NuRec USDZ + PLY",
     "source_type": "video",
-    "output_types": ["ply", "usdz", "collision_mesh_obj"],
+    "output_types": ["ply", "usdz", "collision_mesh_obj", "collision_mesh_ply"],
     "steps": [
         "extract_frames",
         "feature_extraction",
         "feature_matching",
         "sparse_reconstruction",
         "grut_or_fvdb_reconstruction",
+        "generate_mesh",
         "generate_collision_mesh",
+        "generate_tsdf_mesh",
     ],
     "requirements": ["ffmpeg", "colmap", "3dgrut", "frgs"],
     "tunable_params": {
@@ -49,6 +51,19 @@ PIPELINE_INFO = {
         "collision_mesh_target_faces": "Target face count after decimation (500-500000, default 50000). Lower = faster physics, higher = more accurate collisions",
         "collision_mesh_alpha": "Alpha parameter for alpha-shape method (0.01-100.0, default auto). Higher = tighter fit, lower = smoother. 0 = auto-compute from point density",
         "collision_mesh_downsample": "Point cloud downsampling factor before meshing (1-64, default 4). Higher = faster but less detailed mesh",
+        "tsdf_mesh_enabled": "Generate a high-quality TSDF fusion mesh from Gaussian splats for Isaac Sim physics (default true). Uses KinectFusion-style volumetric integration of rendered depth maps",
+        "tsdf_voxel_size": "TSDF voxel edge length in world units (0.005-0.5, default 0.01). Smaller = more detail but slower and more memory",
+        "tsdf_truncation_distance": "TSDF truncation distance in world units (0.01-1.0, default 0.03). Typically 3x voxel_size. Larger = smoother surface",
+        "tsdf_depth_image_size": "Resolution for depth map rendering (128-2048, default 1024). Higher = better accuracy but slower",
+        "tsdf_splat_radius": "Pixel radius for point splatting during depth rendering (1-10, default 5). Larger fills more holes but may over-smooth",
+        "tsdf_target_faces": "Target face count for TSDF mesh decimation (1000-1000000, default 200000)",
+        "tsdf_downsample": "Point cloud downsampling before TSDF depth rendering (1-64, default 1). Higher = faster but coarser depth maps",
+        "mesh_extraction_method": "Mesh extraction method for fVDB workflows: 'dlnr' (DLNR neural stereo depth, default, highest quality), 'basic' (direct Gaussian depth rendering), or 'tsdf' (legacy custom TSDF fusion). Both dlnr and basic use frgs sparse TSDF + marching cubes and produce vertex-colored meshes",
+        "mesh_truncation_margin": "Truncation margin for frgs mesh extraction in world units (0.001-1.0, default 0.05). Controls the TSDF narrow band width",
+        "mesh_grid_shell_thickness": "Grid shell thickness in voxels for frgs mesh extraction (1.0-20.0, default 3.0). Higher = thicker narrow band, more robust but slower",
+        "mesh_dlnr_backbone": "DLNR backbone model: 'middleburry' (default) or 'sceneflow'. Only used when mesh_extraction_method=dlnr",
+        "mesh_image_downsample_factor": "Image downsampling for mesh depth rendering (1-12, default 1). Higher = faster but coarser mesh",
+        "mesh_embed_in_usdz": "Embed the collision mesh into the NuRec USDZ with UsdPhysics.CollisionAPI for Isaac Sim (default true)",
     },
 }
 
@@ -535,6 +550,245 @@ def run_collision_mesh_generation(
     return None, metrics
 
 
+def run_tsdf_mesh_generation(
+    paths: JobPaths,
+    ply_path: str,
+    colmap_sparse_dir: str,
+    *,
+    voxel_size: float = 0.02,
+    truncation_distance: float = 0.06,
+    depth_image_size: int = 512,
+    splat_radius: int = 3,
+    target_faces: int = 100000,
+    downsample: int = 1,
+) -> tuple[Path | None, dict]:
+    """Run the TSDF fusion mesh extraction as a subprocess in the 3dgrut conda env.
+
+    Returns (output_obj_path, metrics_dict).
+    """
+    grut_python = resolve_grut_python()
+    grut_env = build_3dgrut_env()
+
+    script = Path(__file__).parent / "tsdf_fusion.py"
+    tsdf_dir = paths.collision_mesh_dir / "tsdf"
+    tsdf_dir.mkdir(parents=True, exist_ok=True)
+    output_obj = tsdf_dir / "tsdf_mesh.obj"
+
+    cmd = [
+        grut_python,
+        str(script),
+        ply_path,
+        colmap_sparse_dir,
+        str(output_obj),
+        "--voxel-size", str(voxel_size),
+        "--truncation-distance", str(truncation_distance),
+        "--depth-image-size", str(depth_image_size),
+        "--splat-radius", str(splat_radius),
+        "--target-faces", str(target_faces),
+        "--downsample", str(downsample),
+    ]
+
+    result = subprocess.run(
+        cmd,
+        env=grut_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    with paths.log_path.open("a", encoding="utf-8") as log_file:
+        log_file.write(f"$ {' '.join(cmd)}\n")
+        if result.stdout:
+            log_file.write(result.stdout)
+        if result.stderr:
+            log_file.write(result.stderr)
+
+    if result.returncode != 0:
+        raise PipelineError(f"TSDF mesh generation failed ({result.returncode})")
+
+    metrics: dict = {}
+    try:
+        metrics = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    if output_obj.exists():
+        return output_obj, metrics
+    return None, metrics
+
+
+def locate_frgs_checkpoint(paths: JobPaths) -> Path | None:
+    """Find the latest frgs checkpoint (.pt) from fVDB training."""
+    frgs_logs = paths.root / "frgs_logs"
+    if not frgs_logs.exists():
+        return None
+    checkpoints = sorted(frgs_logs.rglob("reconstruct_ckpt.pt"))
+    return checkpoints[-1] if checkpoints else None
+
+
+def run_frgs_mesh_extraction(
+    paths: JobPaths,
+    ply_path: str,
+    *,
+    method: str = "dlnr",
+    truncation_margin: float = 0.05,
+    grid_shell_thickness: float = 3.0,
+    dlnr_backbone: str = "middleburry",
+    image_downsample_factor: int = 1,
+) -> tuple[Path | None, dict]:
+    """Run frgs mesh-dlnr or mesh-basic to extract a textured mesh with vertex colors.
+
+    Uses fVDB's sparse TSDF fusion and marching cubes. The DLNR method uses
+    neural stereo depth estimation for higher quality; basic uses direct
+    Gaussian rendering.
+
+    Returns (output_ply_path, metrics_dict).
+    """
+    frgs_bin = resolve_frgs_binary()
+    frgs_env = build_fvdb_env()
+
+    mesh_dir = paths.collision_mesh_dir / "mesh"
+    mesh_dir.mkdir(parents=True, exist_ok=True)
+    output_ply = mesh_dir / "mesh.ply"
+
+    # Prefer checkpoint for full model fidelity; fall back to PLY
+    checkpoint = locate_frgs_checkpoint(paths)
+    input_path = str(checkpoint) if checkpoint else ply_path
+
+    subcmd = "mesh-dlnr" if method == "dlnr" else "mesh-basic"
+
+    cmd = [
+        frgs_bin,
+        subcmd,
+        input_path,
+        str(truncation_margin),
+        "--output-path", str(output_ply),
+        "--grid-shell-thickness", str(grid_shell_thickness),
+        "--device", "cuda",
+    ]
+
+    if method == "dlnr":
+        cmd.extend(["--dlnr-backbone", dlnr_backbone])
+
+    if image_downsample_factor > 1:
+        cmd.extend(["--image-downsample-factor", str(image_downsample_factor)])
+
+    result = subprocess.run(
+        cmd,
+        env=frgs_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    with paths.log_path.open("a", encoding="utf-8") as log_file:
+        log_file.write(f"\n$ {' '.join(cmd)}\n")
+        if result.stdout:
+            log_file.write(result.stdout)
+        if result.stderr:
+            log_file.write(result.stderr)
+
+    if result.returncode != 0:
+        # If DLNR fails, fall back to mesh-basic
+        if method == "dlnr":
+            with paths.log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write("DLNR mesh extraction failed; falling back to mesh-basic.\n")
+            return run_frgs_mesh_extraction(
+                paths, ply_path,
+                method="basic",
+                truncation_margin=truncation_margin,
+                grid_shell_thickness=grid_shell_thickness,
+                image_downsample_factor=image_downsample_factor,
+            )
+        raise PipelineError(f"frgs {subcmd} mesh extraction failed ({result.returncode})")
+
+    metrics: dict = {"method": subcmd, "input_path": input_path}
+    if output_ply.exists():
+        # Convert PLY to OBJ for broader compatibility while keeping the
+        # vertex-colored PLY as the primary artifact
+        try:
+            grut_python = resolve_grut_python()
+            grut_env = build_3dgrut_env()
+            output_obj = mesh_dir / "mesh.obj"
+            convert_cmd = [
+                grut_python, "-c",
+                f"import trimesh; m = trimesh.load('{output_ply}', process=False); m.export('{output_obj}')",
+            ]
+            subprocess.run(convert_cmd, env=grut_env, capture_output=True, text=True, check=False)
+        except Exception:
+            pass
+
+        return output_ply, metrics
+    return None, metrics
+
+
+def run_add_mesh_to_usdz(
+    paths: JobPaths,
+    usdz_path: str,
+    mesh_path: str,
+) -> Path | None:
+    """Embed a collision mesh into a NuRec USDZ using the 3DGRUT add_mesh_to_usdz script.
+
+    Sets UsdPhysics.CollisionAPI on the mesh and marks it invisible (physics only).
+    Returns the path to the updated USDZ, or None on failure.
+    """
+    grut_python = resolve_grut_python()
+    grut_env = build_3dgrut_env()
+
+    script = settings.grut_install_dir / "threedgrut" / "export" / "scripts" / "add_mesh_to_usdz.py"
+    if not script.exists():
+        return None
+
+    output_usdz = Path(usdz_path).parent / "output_with_mesh.usdz"
+
+    # Determine whether the mesh is PLY or USD; convert OBJ→PLY if needed
+    mesh_ext = Path(mesh_path).suffix.lower()
+    if mesh_ext == ".obj":
+        # add_mesh_to_usdz.py only accepts PLY or USD — convert OBJ to PLY
+        ply_path = Path(mesh_path).with_suffix(".ply")
+        conv = subprocess.run(
+            [grut_python, "-c",
+             f"import trimesh; m = trimesh.load('{mesh_path}', process=False); m.export('{ply_path}')"],
+            env=grut_env, capture_output=True, text=True, check=False,
+        )
+        if conv.returncode == 0 and ply_path.exists():
+            mesh_path = str(ply_path)
+            mesh_ext = ".ply"
+    mesh_arg = "--mesh_ply" if mesh_ext == ".ply" else "--mesh_usd"
+
+    cmd = [
+        grut_python,
+        str(script),
+        "--input_usdz", usdz_path,
+        "--output_usdz", str(output_usdz),
+        mesh_arg, mesh_path,
+        "--set_collision",
+        "--set_invisible",
+    ]
+
+    result = subprocess.run(
+        cmd,
+        env=grut_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    with paths.log_path.open("a", encoding="utf-8") as log_file:
+        log_file.write(f"\n$ {' '.join(cmd)}\n")
+        if result.stdout:
+            log_file.write(result.stdout)
+        if result.stderr:
+            log_file.write(result.stderr)
+
+    if result.returncode == 0 and output_usdz.exists():
+        # Replace the original USDZ with the one containing the mesh
+        import shutil as _shutil
+        _shutil.move(str(output_usdz), usdz_path)
+        return Path(usdz_path)
+    return None
+
+
 def process_reconstruction_job(db: Session, reconstruction_id: str) -> None:
     reconstruction = db.get(Reconstruction, reconstruction_id)
     if reconstruction is None:
@@ -557,12 +811,30 @@ def process_reconstruction_job(db: Session, reconstruction_id: str) -> None:
     grut_render_method = str(processing_params.get("grut_render_method", settings.grut_render_method))
     grut_strategy = str(processing_params.get("grut_strategy", settings.grut_strategy))
     grut_downsample_factor = int(processing_params.get("grut_downsample_factor", settings.grut_downsample_factor))
-    splat_only_mode = bool(processing_params.get("splat_only_mode", settings.splat_only_mode))
-    collision_mesh_enabled = bool(processing_params.get("collision_mesh_enabled", settings.collision_mesh_enabled))
-    collision_mesh_method = str(processing_params.get("collision_mesh_method", settings.collision_mesh_method))
-    collision_mesh_target_faces = int(processing_params.get("collision_mesh_target_faces", settings.collision_mesh_target_faces))
-    collision_mesh_alpha = float(processing_params.get("collision_mesh_alpha", settings.collision_mesh_alpha))
-    collision_mesh_downsample = int(processing_params.get("collision_mesh_downsample", settings.collision_mesh_downsample))
+    def _p(key, default):
+        """Get param from processing_params, falling back to default if missing or None."""
+        val = processing_params.get(key)
+        return val if val is not None else default
+
+    splat_only_mode = bool(_p("splat_only_mode", settings.splat_only_mode))
+    collision_mesh_enabled = bool(_p("collision_mesh_enabled", settings.collision_mesh_enabled))
+    collision_mesh_method = str(_p("collision_mesh_method", settings.collision_mesh_method))
+    collision_mesh_target_faces = int(_p("collision_mesh_target_faces", settings.collision_mesh_target_faces))
+    collision_mesh_alpha = float(_p("collision_mesh_alpha", settings.collision_mesh_alpha))
+    collision_mesh_downsample = int(_p("collision_mesh_downsample", settings.collision_mesh_downsample))
+    tsdf_mesh_enabled = bool(_p("tsdf_mesh_enabled", settings.tsdf_mesh_enabled))
+    tsdf_voxel_size = float(_p("tsdf_voxel_size", settings.tsdf_voxel_size))
+    tsdf_truncation_distance = float(_p("tsdf_truncation_distance", settings.tsdf_truncation_distance))
+    tsdf_depth_image_size = int(_p("tsdf_depth_image_size", settings.tsdf_depth_image_size))
+    tsdf_splat_radius = int(_p("tsdf_splat_radius", settings.tsdf_splat_radius))
+    tsdf_target_faces = int(_p("tsdf_target_faces", settings.tsdf_target_faces))
+    tsdf_downsample = int(_p("tsdf_downsample", settings.tsdf_downsample))
+    mesh_extraction_method = str(_p("mesh_extraction_method", settings.mesh_extraction_method))
+    mesh_truncation_margin = float(_p("mesh_truncation_margin", settings.mesh_truncation_margin))
+    mesh_grid_shell_thickness = float(_p("mesh_grid_shell_thickness", settings.mesh_grid_shell_thickness))
+    mesh_dlnr_backbone = str(_p("mesh_dlnr_backbone", settings.mesh_dlnr_backbone))
+    mesh_image_downsample_factor = int(_p("mesh_image_downsample_factor", settings.mesh_image_downsample_factor))
+    mesh_embed_in_usdz = bool(_p("mesh_embed_in_usdz", settings.mesh_embed_in_usdz))
 
     paths.root.mkdir(parents=True, exist_ok=True)
 
@@ -783,14 +1055,20 @@ def process_reconstruction_job(db: Session, reconstruction_id: str) -> None:
         write_metadata(reconstruction, paths)
         reconstruction.artifact_metadata_path = str(paths.metadata_path)
         if not splat_only_mode and reconstruction_backend != "3dgrut":
-            update_reconstruction(db, reconstruction, status=ReconstructionStatus.exporting, step="frgs_convert", pct=90)
+            update_reconstruction(db, reconstruction, status=ReconstructionStatus.exporting, step="ply_to_usdz", pct=90)
             output_usdz = paths.fvdb_dir / "fvdb_output.usdz"
+            # Use standalone converter (runs under 3DGRUT env which has working
+            # usd-core on aarch64; fVDB env only has a stub pxr package).
+            converter_script = str(
+                Path(__file__).with_name("convert_ply_to_usdz.py")
+            )
             try:
                 run_command(
-                    [frgs_bin, "convert", str(reconstruction.artifact_ply_path), str(output_usdz)],
+                    [resolve_grut_python(), converter_script,
+                     str(reconstruction.artifact_ply_path), str(output_usdz)],
                     paths.log_path,
                     cwd=paths.root,
-                    env=frgs_env,
+                    env=build_3dgrut_env(),
                 )
                 if output_usdz.exists():
                     reconstruction.artifact_usdz_path = str(output_usdz)
@@ -801,8 +1079,14 @@ def process_reconstruction_job(db: Session, reconstruction_id: str) -> None:
             package_bundle(reconstruction, paths)
             reconstruction.artifact_bundle_path = str(paths.bundle_path)
 
-        # ── Collision mesh generation ────────────────────────────────
-        if collision_mesh_enabled and reconstruction.artifact_ply_path:
+        # ── Mesh extraction ─────────────────────────────────────────
+        # DLNR and mesh-basic require CUDA compute capabilities not
+        # available on all hardware (e.g. GB10 / CC 12.1).  Skip them
+        # for fVDB and go straight to the alpha-shape collision mesh
+        # which is lightweight and works everywhere.
+
+        # ── Collision mesh generation (alpha-shape fallback / 3DGRUT) ─
+        if collision_mesh_enabled and reconstruction.artifact_ply_path and not reconstruction.artifact_collision_mesh_path:
             update_reconstruction(
                 db, reconstruction,
                 status=ReconstructionStatus.generating_collision_mesh,
@@ -819,14 +1103,60 @@ def process_reconstruction_job(db: Session, reconstruction_id: str) -> None:
                 )
                 if collision_obj is not None:
                     reconstruction.artifact_collision_mesh_path = str(collision_obj)
-                    # Write collision metrics to metadata
                     collision_meta_path = paths.collision_mesh_dir / "collision_metrics.json"
                     collision_meta_path.write_text(
                         json.dumps(collision_metrics, indent=2), encoding="utf-8"
                     )
+                    if mesh_embed_in_usdz and reconstruction.artifact_usdz_path:
+                        try:
+                            run_add_mesh_to_usdz(
+                                paths,
+                                reconstruction.artifact_usdz_path,
+                                str(collision_obj),
+                            )
+                        except Exception:
+                            with paths.log_path.open("a", encoding="utf-8") as log_file:
+                                log_file.write("add_mesh_to_usdz failed; USDZ will not contain collision mesh.\n")
             except PipelineError:
                 with paths.log_path.open("a", encoding="utf-8") as log_file:
                     log_file.write("Collision mesh generation failed; continuing without collision mesh.\n")
+
+        # ── TSDF fusion mesh generation (legacy, only for method=tsdf) ──
+        if (
+            tsdf_mesh_enabled
+            and reconstruction.artifact_ply_path
+            and (mesh_extraction_method == "tsdf" or not reconstruction.artifact_collision_mesh_path)
+        ):
+            update_reconstruction(
+                db, reconstruction,
+                status=ReconstructionStatus.generating_tsdf_mesh,
+                step="tsdf_fusion", pct=95,
+            )
+            try:
+                colmap_sparse = str(locate_sparse_model(paths.sparse_dir))
+                tsdf_obj, tsdf_metrics = run_tsdf_mesh_generation(
+                    paths,
+                    reconstruction.artifact_ply_path,
+                    colmap_sparse,
+                    voxel_size=tsdf_voxel_size,
+                    truncation_distance=tsdf_truncation_distance,
+                    depth_image_size=tsdf_depth_image_size,
+                    splat_radius=tsdf_splat_radius,
+                    target_faces=tsdf_target_faces,
+                    downsample=tsdf_downsample,
+                )
+                if tsdf_obj is not None:
+                    tsdf_faces = tsdf_metrics.get("final_faces", 0)
+                    # Only use TSDF mesh if it has meaningful geometry (>100 faces)
+                    if tsdf_faces > 100:
+                        reconstruction.artifact_collision_mesh_path = str(tsdf_obj)
+                    tsdf_meta_path = paths.collision_mesh_dir / "tsdf" / "tsdf_metrics.json"
+                    tsdf_meta_path.write_text(
+                        json.dumps(tsdf_metrics, indent=2), encoding="utf-8"
+                    )
+            except PipelineError:
+                with paths.log_path.open("a", encoding="utf-8") as log_file:
+                    log_file.write("TSDF mesh generation failed; continuing without TSDF mesh.\n")
 
         reconstruction.completed_at = datetime.now(timezone.utc)
 

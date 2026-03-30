@@ -172,7 +172,7 @@ function WorkflowStarter({ onStarted }: { onStarted: () => void }) {
         await startWorkflowFromDataset(selectedDataset, recName, maxIter, psnrThreshold, ssimThreshold, backend);
       } else {
         if (!file) throw new Error("Select a video file");
-        await startWorkflow(file, sceneName || file.name.replace(/\.[^.]+$/, ""), maxIter, setUploadPct, psnrThreshold, ssimThreshold);
+        await startWorkflow(file, sceneName || file.name.replace(/\.[^.]+$/, ""), maxIter, setUploadPct, psnrThreshold, ssimThreshold, backend);
       }
       setFile(null);
       setSceneName("");

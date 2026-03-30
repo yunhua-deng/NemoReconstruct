@@ -35,7 +35,10 @@ Fields: file (video), name (string), and optional parameters:
   grut_downsample_factor, splat_only_mode,
   collision_mesh_enabled, collision_mesh_method,
   collision_mesh_target_faces, collision_mesh_alpha,
-  collision_mesh_downsample
+  collision_mesh_downsample,
+  tsdf_mesh_enabled, tsdf_voxel_size,
+  tsdf_truncation_distance, tsdf_depth_image_size,
+  tsdf_splat_radius, tsdf_target_faces, tsdf_downsample
 ```
 
 ### Check status

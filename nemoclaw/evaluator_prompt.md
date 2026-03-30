@@ -129,6 +129,11 @@ Given the current results, suggest parameter changes:
 | Collision mesh too slow | Increase `collision_mesh_downsample` (8-16) and decrease `collision_mesh_target_faces` |
 | Collision mesh doesn't fit scene | Use `collision_mesh_method` = `alpha` with higher `collision_mesh_alpha` |
 | No collision mesh needed | Set `collision_mesh_enabled` to false |
+| Need high-quality physics mesh for Isaac Sim | Enable `tsdf_mesh_enabled` for TSDF fusion mesh (much better surface than alpha shape) |
+| TSDF mesh too coarse | Decrease `tsdf_voxel_size` (e.g., 0.01) for finer detail |
+| TSDF mesh too slow / OOM | Increase `tsdf_voxel_size` (e.g., 0.05) or increase `tsdf_downsample` |
+| TSDF mesh has holes | Increase `tsdf_splat_radius` (5-8) or increase `tsdf_depth_image_size` (1024) |
+| TSDF mesh over-smoothed | Decrease `tsdf_truncation_distance` (closer to `tsdf_voxel_size`) |
 
 ## Backend-Specific Parameters
 
@@ -137,6 +142,7 @@ When suggesting parameter changes, ONLY include parameters relevant to the activ
 **Common parameters** (always valid for any backend):
 - `frame_rate`, `sequential_matcher_overlap`, `colmap_mapper_type`, `colmap_max_num_features`, `splat_only_mode`
 - `collision_mesh_enabled`, `collision_mesh_method`, `collision_mesh_target_faces`, `collision_mesh_alpha`, `collision_mesh_downsample`
+- `tsdf_mesh_enabled`, `tsdf_voxel_size`, `tsdf_truncation_distance`, `tsdf_depth_image_size`, `tsdf_splat_radius`, `tsdf_target_faces`, `tsdf_downsample`
 
 **3DGRUT-only parameters** (only when backend is `3dgrut`):
 - `grut_n_iterations`, `grut_render_method`, `grut_strategy`, `grut_downsample_factor`

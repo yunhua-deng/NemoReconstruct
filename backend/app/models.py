@@ -25,6 +25,8 @@ class ReconstructionStatus(str, enum.Enum):
     grut_reconstruction = "grut_reconstruction"
     exporting = "exporting"
     generating_collision_mesh = "generating_collision_mesh"
+    generating_tsdf_mesh = "generating_tsdf_mesh"
+    generating_mesh = "generating_mesh"
     completed = "completed"
     failed = "failed"
 

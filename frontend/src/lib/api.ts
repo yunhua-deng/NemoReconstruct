@@ -174,6 +174,7 @@ export function startWorkflow(
   onProgress?: (pct: number) => void,
   acceptPsnrThreshold: number = 25.0,
   acceptSsimThreshold: number = 0.85,
+  reconstructionBackend: string = "fvdb",
 ): Promise<WorkflowDetail> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -200,6 +201,7 @@ export function startWorkflow(
     form.append("max_iterations", String(maxIterations));
     form.append("accept_psnr_threshold", String(acceptPsnrThreshold));
     form.append("accept_ssim_threshold", String(acceptSsimThreshold));
+    form.append("reconstruction_backend", reconstructionBackend);
     xhr.send(form);
   });
 }

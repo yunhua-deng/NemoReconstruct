@@ -62,6 +62,7 @@ def start_workflow(
     max_iterations: int = Form(3),
     accept_psnr_threshold: float = Form(25.0),
     accept_ssim_threshold: float = Form(0.85),
+    reconstruction_backend: str = Form("fvdb"),
     db: Session = Depends(get_db),
 ) -> WorkflowDetail:
     suffix = Path(file.filename or "upload.mov").suffix.lower()
@@ -107,15 +108,15 @@ def start_workflow(
 
     env_vars = {
         "WORKFLOW_ID": w.id,
-        "WORKFLOW_API_URL": f"http://127.0.0.1:{settings.api_prefix.split(':')[-1] if ':' in settings.api_prefix else '8010'}",
+        "WORKFLOW_API_URL": "http://127.0.0.1:8010",
         "AGENT_TIMEOUT": "600",
         "ACCEPT_PSNR_THRESHOLD": str(w.accept_psnr_threshold),
         "ACCEPT_SSIM_THRESHOLD": str(w.accept_ssim_threshold),
+        "INITIAL_BACKEND": reconstruction_backend,
     }
 
     proc_env = os.environ.copy()
     proc_env.update(env_vars)
-    proc_env["WORKFLOW_API_URL"] = "http://127.0.0.1:8010"
 
     proc = subprocess.Popen(
         [str(orchestrate_script), str(video_path), scene_name, str(max_iterations)],

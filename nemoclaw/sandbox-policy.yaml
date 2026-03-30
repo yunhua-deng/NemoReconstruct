@@ -64,8 +64,7 @@ network_policies:
       - path: /bin/bash
 
   # 2. OpenClaw gateway (required)
-  #    Handles agent harness communication AND proxies LLM inference
-  #    (inference.local → gateway → Ollama on host:11434)
+  #    Handles agent harness communication
   #    Used by: Agent A and Agent B
   openclaw_gateway:
     name: openclaw-gateway
@@ -78,3 +77,5 @@ network_policies:
     binaries:
       - path: /usr/bin/node
       - path: /bin/bash
+
+

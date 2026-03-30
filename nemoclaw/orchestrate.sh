@@ -95,7 +95,66 @@ fi
 echo "[orchestrator] Backend healthy: $HEALTH"
 echo ""
 
-# Helper: run a sandboxed agent with a message
+# Ensure the sandbox container image is cached and ready.
+# On a cold start the openclaw image needs to be pulled from ghcr.io, which
+# can take minutes. This function creates a throwaway sandbox with a generous
+# timeout, retrying if necessary, so that all subsequent sandbox creates are
+# near-instant.
+SANDBOX_WARMUP_TIMEOUT="${SANDBOX_WARMUP_TIMEOUT:-600}"  # 10 min for image pull
+SANDBOX_WARMUP_RETRIES="${SANDBOX_WARMUP_RETRIES:-3}"
+
+ensure_sandbox_ready() {
+    echo "[orchestrator] Ensuring sandbox image is cached..."
+
+    # Quick test: try to create a sandbox that just runs 'echo ok'.
+    # If the image is cached this completes in ~5s.
+    local quick_output
+    quick_output=$(timeout 30s openshell sandbox create \
+        --from openclaw --no-keep \
+        -- echo "sandbox-ok" 2>&1) || true
+
+    if echo "$quick_output" | grep -q "sandbox-ok"; then
+        echo "[orchestrator] Sandbox image ready (cached)."
+        return 0
+    fi
+
+    echo "[orchestrator] Image not cached — pulling (this may take a few minutes)..."
+
+    for ((attempt=1; attempt<=SANDBOX_WARMUP_RETRIES; attempt++)); do
+        echo "[orchestrator] Warmup attempt $attempt/$SANDBOX_WARMUP_RETRIES (timeout: ${SANDBOX_WARMUP_TIMEOUT}s)..."
+
+        local warmup_output
+        warmup_output=$(timeout "${SANDBOX_WARMUP_TIMEOUT}s" openshell sandbox create \
+            --from openclaw --no-keep \
+            -- echo "sandbox-ok" 2>&1) || true
+
+        if echo "$warmup_output" | grep -q "sandbox-ok"; then
+            echo "[orchestrator] Sandbox image ready after warmup."
+            return 0
+        fi
+
+        echo "[orchestrator] Warmup attempt $attempt failed."
+        if [[ $attempt -lt $SANDBOX_WARMUP_RETRIES ]]; then
+            echo "[orchestrator] Waiting 30s before next attempt..."
+            sleep 30
+        fi
+    done
+
+    echo "[orchestrator] WARNING: Could not warm up sandbox image after $SANDBOX_WARMUP_RETRIES attempts."
+    echo "[orchestrator] Continuing anyway — sandbox creates may fail."
+    return 1
+}
+
+# Warm up sandbox image before entering the main loop
+ensure_sandbox_ready || true
+echo ""
+
+# Helper: run a sandboxed agent with a message.
+# Retries sandbox creation up to 3 times if the sandbox fails to start
+# (e.g. image pull still in progress, transient infrastructure error).
+RUN_AGENT_RETRIES="${RUN_AGENT_RETRIES:-3}"
+RUN_AGENT_RETRY_DELAY="${RUN_AGENT_RETRY_DELAY:-30}"
+
 run_agent() {
     local session_id="$1"
     local message="$2"
@@ -115,17 +174,28 @@ run_agent() {
         ln -s "$VIDEO_PATH" "$stage_dir/$(basename "$VIDEO_PATH")"
     fi
 
-    # Use 'timeout' as a hard kill-switch since openclaw's --timeout is unreliable.
-    # Allow TIMEOUT for agent work + 120s overhead for upload/bootstrap.
-    local hard_timeout=$(( TIMEOUT + 120 ))
+    # Override personality/workspace files from the openclaw image with minimal
+    # stubs. The defaults (AGENTS.md, SOUL.md, etc.) add ~13K chars to the
+    # system prompt, which slows inference on local LLMs dramatically.
+    echo "You are a task runner. Follow instructions precisely." > "$stage_dir/AGENTS.md"
+    for f in SOUL.md TOOLS.md IDENTITY.md USER.md HEARTBEAT.md BOOTSTRAP.md; do
+        : > "$stage_dir/$f"  # empty files
+    done
 
-    timeout --signal=KILL "${hard_timeout}s" \
-    openshell sandbox create \
-        --from openclaw \
-        --policy "$POLICY" \
-        --no-git-ignore \
-        --upload "$stage_dir:/sandbox/NemoReconstruct" \
-        -- bash -c "
+    # Use 'timeout' as a safety net. Send SIGTERM first, then SIGKILL after 60s
+    # if the process doesn't exit. This lets openclaw write its JSON output on
+    # graceful shutdown. Allow 300s margin for upload/bootstrap/shutdown.
+    local hard_timeout=$(( TIMEOUT + 300 ))
+
+    for ((agent_try=1; agent_try<=RUN_AGENT_RETRIES; agent_try++)); do
+        local output
+        output=$(timeout --signal=TERM --kill-after=60 "${hard_timeout}s" \
+        openshell sandbox create \
+            --from openclaw \
+            --policy "$POLICY" \
+            --no-git-ignore \
+            --upload "$stage_dir:/sandbox/NemoReconstruct" \
+            -- bash -c "
 mkdir -p /sandbox/.openclaw
 cp /sandbox/NemoReconstruct/nemoclaw/sandbox-openclaw.json /sandbox/.openclaw/openclaw.json
 export OPENAI_API_KEY=unused
@@ -133,7 +203,23 @@ cd /sandbox/NemoReconstruct
 openclaw agent --local --session-id $session_id \
     --message \"$(echo "$message" | sed 's/"/\\"/g')\" \
     --json --timeout $TIMEOUT
-" || true
+" 2>&1) || true
+
+        # Check if the sandbox actually produced agent output (not just an error)
+        if echo "$output" | grep -qE '[0-9a-f]{8}-[0-9a-f]{4}|"status"|completed|failed|reconstruction'; then
+            echo "$output"
+            return 0
+        fi
+
+        echo "[orchestrator] Sandbox attempt $agent_try/$RUN_AGENT_RETRIES produced no usable output." >&2
+        if [[ $agent_try -lt $RUN_AGENT_RETRIES ]]; then
+            echo "[orchestrator] Retrying in ${RUN_AGENT_RETRY_DELAY}s..." >&2
+            sleep "$RUN_AGENT_RETRY_DELAY"
+        fi
+    done
+
+    # All retries exhausted — return last output (may be empty)
+    echo "$output"
 }
 
 # Wait for reconstruction to reach a terminal state (completed or failed).
@@ -329,7 +415,13 @@ VALID_KEYS = {'frame_rate','sequential_matcher_overlap','colmap_mapper_type',
               'colmap_max_num_features','reconstruction_backend',
               'fvdb_max_epochs','fvdb_sh_degree','fvdb_image_downsample_factor',
               'grut_n_iterations','grut_render_method','grut_strategy',
-              'grut_downsample_factor','splat_only_mode'}
+              'grut_downsample_factor','splat_only_mode',
+              'collision_mesh_enabled','collision_mesh_method',
+              'collision_mesh_target_faces','collision_mesh_alpha',
+              'collision_mesh_downsample',
+              'tsdf_mesh_enabled','tsdf_voxel_size',
+              'tsdf_truncation_distance','tsdf_depth_image_size',
+              'tsdf_splat_radius','tsdf_target_faces','tsdf_downsample'}
 
 GRUT_ONLY = {'grut_n_iterations','grut_render_method','grut_strategy','grut_downsample_factor'}
 FVDB_ONLY = {'fvdb_max_epochs','fvdb_sh_degree','fvdb_image_downsample_factor'}
@@ -432,35 +524,59 @@ echo "============================================"
 echo " Iteration 1: Initial Run"
 echo "============================================"
 
-if [[ "$DATASET_MODE" == "true" ]]; then
-    # Dataset mode: runner uses the from-dataset API
-    if [[ "$CURRENT_BACKEND" == "fvdb" ]]; then
-        BACKEND_PARAMS="reconstruction_backend=fvdb, fvdb_max_epochs=${INITIAL_FVDB_EPOCHS:-30}, fvdb_image_downsample_factor=${INITIAL_FVDB_DS:-4}"
-    else
-        BACKEND_PARAMS="reconstruction_backend=${CURRENT_BACKEND}, grut_n_iterations=${INITIAL_GRUT_ITERS:-5000}, grut_downsample_factor=${INITIAL_GRUT_DS:-4}"
-    fi
-    RUNNER_MSG="Check the backend health at ${API_URL}. Then start a reconstruction from the pre-existing dataset '${DATASET_NAME}' using curl to POST to ${API_URL}/api/v1/reconstructions/from-dataset. Use these form fields: dataset_name=${DATASET_NAME}, name=${SCENE_NAME}, ${BACKEND_PARAMS}. After posting, extract the reconstruction ID from the response. Then poll the status using a shell loop: run 'while true; do sleep 30; curl -s ${API_URL}/api/v1/reconstructions/<ID>/status; done' and wait for it to show completed or failed. Report the reconstruction ID and final status."
-else
-    # Video mode: runner uploads the video file
-    VIDEO_BASENAME="$(basename "$VIDEO_PATH")"
-    VIDEO_EXT="${VIDEO_BASENAME##*.}"
-    SANDBOX_VIDEO="/sandbox/NemoReconstruct/${VIDEO_BASENAME}"
-
-    if [[ "$CURRENT_BACKEND" == "fvdb" ]]; then
-        BACKEND_PARAMS="reconstruction_backend=fvdb, fvdb_max_epochs=${INITIAL_FVDB_EPOCHS:-30}, fvdb_image_downsample_factor=${INITIAL_FVDB_DS:-4}"
-    else
-        BACKEND_PARAMS="reconstruction_backend=${CURRENT_BACKEND}, grut_n_iterations=${INITIAL_GRUT_ITERS:-5000}, grut_downsample_factor=${INITIAL_GRUT_DS:-4}"
-    fi
-
-    RUNNER_MSG="Check the backend health at ${API_URL}. Then upload the video at ${SANDBOX_VIDEO} with name '${SCENE_NAME}' using curl to the API at ${API_URL}. Use these form fields: file=@${SANDBOX_VIDEO}, name=${SCENE_NAME}, ${BACKEND_PARAMS}, frame_rate=${INITIAL_FRAME_RATE:-1.0}, splat_only_mode=${INITIAL_SPLAT_ONLY:-false}. After uploading, poll the status using a shell loop: run 'while true; do sleep 30; curl -s ${API_URL}/api/v1/reconstructions/<ID>/status; done' and wait for it to show completed or failed. Report the reconstruction ID and final status."
-fi
-
-echo "[orchestrator] Starting Runner agent..."
-echo ""
-
 update_workflow '{"status":"running","current_agent":"runner","current_step":"uploading and reconstructing","iteration":1}'
 
-RUNNER_OUTPUT=$(run_agent "runner-iter-1" "$RUNNER_MSG" "runner_prompt.md" 2>&1)
+# ── Runner phase: direct API call ───────────────────────
+# The runner phase issues a deterministic curl call. Using the LLM agent here
+# adds minutes of overhead (multiple slow inference rounds on local models)
+# with no benefit — the API call is fully specified by the orchestrator.
+# The evaluator phase still uses the LLM agent where judgment is needed.
+
+echo "[orchestrator] Starting reconstruction via API..."
+
+if [[ "$DATASET_MODE" == "true" ]]; then
+    if [[ "$CURRENT_BACKEND" == "fvdb" ]]; then
+        RUNNER_OUTPUT=$(curl -sf "${API_URL}/api/v1/reconstructions/from-dataset" \
+            -F "dataset_name=${DATASET_NAME}" \
+            -F "name=${SCENE_NAME}" \
+            -F "reconstruction_backend=fvdb" \
+            -F "fvdb_max_epochs=${INITIAL_FVDB_EPOCHS:-30}" \
+            -F "fvdb_image_downsample_factor=${INITIAL_FVDB_DS:-4}" \
+            2>&1) || true
+    else
+        RUNNER_OUTPUT=$(curl -sf "${API_URL}/api/v1/reconstructions/from-dataset" \
+            -F "dataset_name=${DATASET_NAME}" \
+            -F "name=${SCENE_NAME}" \
+            -F "reconstruction_backend=${CURRENT_BACKEND}" \
+            -F "grut_n_iterations=${INITIAL_GRUT_ITERS:-5000}" \
+            -F "grut_downsample_factor=${INITIAL_GRUT_DS:-4}" \
+            2>&1) || true
+    fi
+else
+    VIDEO_BASENAME="$(basename "$VIDEO_PATH")"
+    if [[ "$CURRENT_BACKEND" == "fvdb" ]]; then
+        RUNNER_OUTPUT=$(curl -sf "${API_URL}/api/v1/reconstructions/upload" \
+            -F "file=@${VIDEO_PATH}" \
+            -F "name=${SCENE_NAME}" \
+            -F "reconstruction_backend=fvdb" \
+            -F "fvdb_max_epochs=${INITIAL_FVDB_EPOCHS:-30}" \
+            -F "fvdb_image_downsample_factor=${INITIAL_FVDB_DS:-4}" \
+            -F "frame_rate=${INITIAL_FRAME_RATE:-1.0}" \
+            -F "splat_only_mode=${INITIAL_SPLAT_ONLY:-false}" \
+            2>&1) || true
+    else
+        RUNNER_OUTPUT=$(curl -sf "${API_URL}/api/v1/reconstructions/upload" \
+            -F "file=@${VIDEO_PATH}" \
+            -F "name=${SCENE_NAME}" \
+            -F "reconstruction_backend=${CURRENT_BACKEND}" \
+            -F "grut_n_iterations=${INITIAL_GRUT_ITERS:-5000}" \
+            -F "grut_downsample_factor=${INITIAL_GRUT_DS:-4}" \
+            -F "frame_rate=${INITIAL_FRAME_RATE:-1.0}" \
+            -F "splat_only_mode=${INITIAL_SPLAT_ONLY:-false}" \
+            2>&1) || true
+    fi
+fi
+
 echo "$RUNNER_OUTPUT"
 
 RECONSTRUCTION_ID=$(echo "$RUNNER_OUTPUT" | extract_id)
@@ -493,6 +609,154 @@ if [[ "$JOB_STATUS" == "timeout" ]]; then
     exit 1
 fi
 
+# ── Direct evaluator ────────────────────────────────────
+# Like the runner, the evaluator uses direct API calls + deterministic logic
+# instead of an LLM agent. The acceptance criteria and parameter tuning
+# heuristics are well-defined; an LLM adds minutes of overhead on local
+# hardware with no benefit for this domain.
+#
+# Thresholds:
+#   fVDB:   loss < 0.25 AND ssimloss < (1 - ACCEPT_SSIM)  [ssimloss = 1-SSIM]
+#   3DGRUT: psnr > ACCEPT_PSNR AND ssim > ACCEPT_SSIM
+LOSS_THRESHOLD="${LOSS_THRESHOLD:-0.25}"
+SSIMLOSS_THRESHOLD=$(python3 -c "print(1.0 - ${ACCEPT_SSIM})")
+
+evaluate_direct() {
+    local reconstruction_id="$1"
+    local backend="$2"
+
+    local metrics details history
+    metrics=$(curl -sf "${API_URL}/api/v1/reconstructions/${reconstruction_id}/metrics" 2>/dev/null || echo '{}')
+    details=$(curl -sf "${API_URL}/api/v1/reconstructions/${reconstruction_id}" 2>/dev/null || echo '{}')
+    history=$(curl -sf "${API_URL}/api/v1/reconstructions/${reconstruction_id}/iterations" 2>/dev/null || echo '{"iterations":[]}')
+
+    METRICS_JSON="$metrics" DETAILS_JSON="$details" HISTORY_JSON="$history" \
+    BACKEND="$backend" LOSS_T="$LOSS_THRESHOLD" SSIMLOSS_T="$SSIMLOSS_THRESHOLD" \
+    PSNR_T="$ACCEPT_PSNR" SSIM_T="$ACCEPT_SSIM" \
+    python3 << 'EVALEOF'
+import os, json, sys
+
+metrics_raw = json.loads(os.environ.get("METRICS_JSON", "{}"))
+details = json.loads(os.environ.get("DETAILS_JSON", "{}"))
+history = json.loads(os.environ.get("HISTORY_JSON", '{"iterations":[]}'))
+backend = os.environ.get("BACKEND", "")
+loss_t = float(os.environ.get("LOSS_T", "0.25"))
+ssimloss_t = float(os.environ.get("SSIMLOSS_T", "0.15"))
+psnr_t = float(os.environ.get("PSNR_T", "25.0"))
+ssim_t = float(os.environ.get("SSIM_T", "0.85"))
+
+summary = metrics_raw.get("summary", {})
+params = details.get("processing_params", {})
+iterations = history.get("iterations", [])
+
+def fmt(v):
+    return f"{v:.4f}" if isinstance(v, float) else str(v)
+
+if backend == "fvdb":
+    loss = summary.get("reconstruct/loss")
+    ssimloss = summary.get("reconstruct/ssimloss")
+    num_gauss = summary.get("reconstruct/num_gaussians")
+    sh_deg = summary.get("reconstruct/sh_degree")
+
+    cur_epochs = params.get("fvdb_max_epochs", 30)
+    cur_ds = params.get("fvdb_image_downsample_factor", 4)
+    cur_sh = params.get("fvdb_sh_degree")
+
+    if loss is None or ssimloss is None:
+        result = {"verdict": "ACCEPT", "reason": "No metrics available, accepting as-is"}
+        print(json.dumps(result))
+        sys.exit(0)
+
+    ssim_val = 1.0 - ssimloss
+    parts = [f"loss={fmt(loss)} (threshold<{loss_t})",
+             f"ssimloss={fmt(ssimloss)} (SSIM={fmt(ssim_val)}, threshold>{ssim_t})"]
+    if num_gauss: parts.append(f"gaussians={int(num_gauss):,}")
+    if sh_deg is not None: parts.append(f"sh_degree={int(sh_deg)}")
+    metric_str = ", ".join(parts)
+
+    if loss < loss_t and ssimloss < ssimloss_t:
+        result = {"verdict": "ACCEPT",
+                  "reason": f"Quality meets thresholds. {metric_str}"}
+    else:
+        # Suggest parameter improvements
+        new_params = {}
+        reasons = []
+
+        if loss >= loss_t:
+            reasons.append(f"loss={fmt(loss)} exceeds {loss_t}")
+        if ssimloss >= ssimloss_t:
+            reasons.append(f"SSIM={fmt(ssim_val)} below {ssim_t}")
+
+        # Heuristic: increase epochs first, then reduce downsample
+        prev_epochs = [it.get("params", {}).get("fvdb_max_epochs") for it in iterations if it.get("params", {}).get("fvdb_max_epochs")]
+        if cur_epochs < 60:
+            new_params["fvdb_max_epochs"] = min(cur_epochs * 2, 90)
+            reasons.append(f"increasing epochs from {cur_epochs} to {new_params['fvdb_max_epochs']}")
+        elif cur_ds and cur_ds > 2:
+            new_params["fvdb_image_downsample_factor"] = max(cur_ds // 2, 1)
+            reasons.append(f"reducing downsample from {cur_ds} to {new_params['fvdb_image_downsample_factor']}")
+        else:
+            # Already at high epochs and low downsample — try more epochs
+            new_params["fvdb_max_epochs"] = min(cur_epochs + 30, 120)
+            reasons.append(f"increasing epochs to {new_params['fvdb_max_epochs']}")
+
+        result = {"verdict": "ITERATE",
+                  "reason": f"{metric_str}. {'; '.join(reasons)}",
+                  "params": new_params}
+
+elif backend == "3dgrut":
+    psnr = summary.get("psnr") or summary.get("test/psnr")
+    ssim = summary.get("ssim") or summary.get("test/ssim")
+
+    cur_iters = params.get("grut_n_iterations", 5000)
+    cur_ds = params.get("grut_downsample_factor", 4)
+
+    if psnr is None and ssim is None:
+        result = {"verdict": "ACCEPT", "reason": "No metrics available, accepting as-is"}
+        print(json.dumps(result))
+        sys.exit(0)
+
+    parts = []
+    if psnr is not None: parts.append(f"psnr={fmt(psnr)} (threshold>{psnr_t})")
+    if ssim is not None: parts.append(f"ssim={fmt(ssim)} (threshold>{ssim_t})")
+    metric_str = ", ".join(parts) if parts else "no metrics"
+
+    psnr_ok = psnr is not None and psnr > psnr_t
+    ssim_ok = ssim is not None and ssim > ssim_t
+
+    if psnr_ok and ssim_ok:
+        result = {"verdict": "ACCEPT", "reason": f"Quality meets thresholds. {metric_str}"}
+    elif psnr is None and ssim is None:
+        result = {"verdict": "ACCEPT", "reason": "No quality metrics to evaluate"}
+    else:
+        new_params = {}
+        reasons = []
+
+        if psnr is not None and not psnr_ok:
+            reasons.append(f"psnr={fmt(psnr)} below {psnr_t}")
+        if ssim is not None and not ssim_ok:
+            reasons.append(f"ssim={fmt(ssim)} below {ssim_t}")
+
+        if cur_iters < 20000:
+            new_params["grut_n_iterations"] = min(cur_iters * 2, 30000)
+            reasons.append(f"increasing iterations from {cur_iters} to {new_params['grut_n_iterations']}")
+        elif cur_ds and cur_ds > 2:
+            new_params["grut_downsample_factor"] = max(cur_ds // 2, 1)
+            reasons.append(f"reducing downsample from {cur_ds} to {new_params['grut_downsample_factor']}")
+        else:
+            new_params["grut_n_iterations"] = min(cur_iters + 5000, 50000)
+            reasons.append(f"increasing iterations to {new_params['grut_n_iterations']}")
+
+        result = {"verdict": "ITERATE",
+                  "reason": f"{metric_str}. {'; '.join(reasons)}",
+                  "params": new_params}
+else:
+    result = {"verdict": "ACCEPT", "reason": f"Unknown backend '{backend}', accepting as-is"}
+
+print(json.dumps(result))
+EVALEOF
+}
+
 # Iterative evaluation loop
 for ((i=1; i<=MAX_ITERATIONS; i++)); do
     echo ""
@@ -500,43 +764,20 @@ for ((i=1; i<=MAX_ITERATIONS; i++)); do
     echo " Evaluation $i / $MAX_ITERATIONS"
     echo "============================================"
 
-    # Use a backend-appropriate example in the prompt
-    if [[ "$CURRENT_BACKEND" == "fvdb" ]]; then
-        ITERATE_EXAMPLE="{\"verdict\": \"ITERATE\", \"reason\": \"...\", \"params\": {\"fvdb_max_epochs\": 60}}"
-    else
-        ITERATE_EXAMPLE="{\"verdict\": \"ITERATE\", \"reason\": \"...\", \"params\": {\"grut_n_iterations\": 20000}}"
-    fi
-
-    EVAL_MSG="Evaluate reconstruction ${RECONSTRUCTION_ID}. The current reconstruction backend is '${CURRENT_BACKEND}'. Use curl to call the API at ${API_URL}. Fetch the reconstruction details from /api/v1/reconstructions/${RECONSTRUCTION_ID} and the training metrics from /api/v1/reconstructions/${RECONSTRUCTION_ID}/metrics. Also fetch the iteration history from /api/v1/reconstructions/${RECONSTRUCTION_ID}/iterations to see what parameters and metrics each previous iteration produced — use this to avoid repeating failed approaches and to identify improvement trends. Analyze the quality. IMPORTANT: Only suggest parameters relevant to the '${CURRENT_BACKEND}' backend. If the backend is '3dgrut', only use grut_* params and psnr/ssim metrics. If the backend is 'fvdb', only use fvdb_* params and loss/ssimloss metrics. Do NOT mix parameters from different backends. Your final output MUST be exactly one line of JSON like: {\"verdict\": \"ACCEPT\", \"reason\": \"...\"} or ${ITERATE_EXAMPLE}. Use ACCEPT if quality is sufficient (for 3DGRUT: psnr > ${ACCEPT_PSNR} and ssim > ${ACCEPT_SSIM}; for fVDB: loss < 0.25 and ssimloss > ${ACCEPT_SSIM}), otherwise ITERATE with suggested param changes."
-
-    echo "[orchestrator] Starting Evaluator agent..."
+    echo "[orchestrator] Evaluating reconstruction metrics..."
     echo ""
 
     update_workflow "{\"current_agent\":\"evaluator\",\"current_step\":\"analyzing metrics\",\"iteration\":${i}}"
 
-    # Retry evaluator up to 3 times if it returns UNKNOWN (Ollama 500 / empty payloads)
-    VERDICT="UNKNOWN"
-    REASON=""
-    for ((eval_try=1; eval_try<=3; eval_try++)); do
-        EVAL_OUTPUT=$(run_agent "eval-iter-${i}-try-${eval_try}" "$EVAL_MSG" "evaluator_prompt.md" 2>&1)
-        echo "$EVAL_OUTPUT"
+    EVAL_OUTPUT=$(evaluate_direct "$RECONSTRUCTION_ID" "$CURRENT_BACKEND" 2>&1)
+    echo "$EVAL_OUTPUT"
 
-        VERDICT=$(echo "$EVAL_OUTPUT" | extract_verdict || true)
-        REASON=$(echo "$EVAL_OUTPUT" | extract_reason || true)
-        echo ""
-        echo "[orchestrator] Verdict: ${VERDICT:-UNKNOWN} (attempt ${eval_try}/3)"
-        echo "[orchestrator] Reason: ${REASON}"
+    VERDICT=$(echo "$EVAL_OUTPUT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('verdict','UNKNOWN'))" 2>/dev/null || echo "UNKNOWN")
+    REASON=$(echo "$EVAL_OUTPUT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('reason',''))" 2>/dev/null || echo "")
 
-        if [[ "$VERDICT" == "ACCEPT" || "$VERDICT" == "ITERATE" ]]; then
-            break
-        fi
-
-        if [[ $eval_try -lt 3 ]]; then
-            echo "[orchestrator] Evaluator returned UNKNOWN, retrying (attempt $((eval_try+1))/3)..."
-            update_workflow "{\"current_step\":\"retrying evaluation (attempt $((eval_try+1)))\",\"iteration\":${i}}"
-            sleep 5
-        fi
-    done
+    echo ""
+    echo "[orchestrator] Verdict: ${VERDICT}"
+    echo "[orchestrator] Reason: ${REASON}"
 
     # Save evaluator notes to the reconstruction
     save_notes "$RECONSTRUCTION_ID" "[Eval $i] Verdict: ${VERDICT}. ${REASON}"
@@ -568,8 +809,8 @@ for ((i=1; i<=MAX_ITERATIONS; i++)); do
         break
     fi
 
-    # Extract suggested parameters (filtered for current backend)
-    NEW_PARAMS=$(echo "$EVAL_OUTPUT" | extract_params "$CURRENT_BACKEND" || echo "{}")
+    # Extract suggested parameters directly from evaluate_direct JSON
+    NEW_PARAMS=$(echo "$EVAL_OUTPUT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(json.dumps(d.get('params',{})))" 2>/dev/null || echo "{}")
     echo "[orchestrator] Suggested params: $NEW_PARAMS"
 
     # Track backend switches across iterations
@@ -587,17 +828,17 @@ for ((i=1; i<=MAX_ITERATIONS; i++)); do
     echo " Iteration $((i+1)): Retry with new parameters"
     echo "============================================"
 
-    RETRY_MSG="Retry reconstruction ${RECONSTRUCTION_ID} with new parameters. Use curl to POST to ${API_URL}/api/v1/reconstructions/${RECONSTRUCTION_ID}/retry with body: {\"params\": ${NEW_PARAMS}}. After posting, poll the status using a shell loop: run 'while true; do sleep 30; STATUS=\$(curl -s ${API_URL}/api/v1/reconstructions/${RECONSTRUCTION_ID}/status); echo \$STATUS; echo \$STATUS | grep -q '\"completed\"\|\"failed\"' && break; done' and wait for completion. Report the final status."
-
-    echo "[orchestrator] Starting Runner agent (retry)..."
-    echo ""
+    echo "[orchestrator] Retrying reconstruction with new parameters..."
+    echo "[orchestrator] Params: $NEW_PARAMS"
 
     update_workflow "{\"current_agent\":\"runner\",\"current_step\":\"retrying with new params\",\"iteration\":$((i+1))}"
 
-    RETRY_OUTPUT=$(run_agent "runner-iter-$((i+1))" "$RETRY_MSG" "runner_prompt.md" 2>&1)
+    RETRY_OUTPUT=$(curl -sf "${API_URL}/api/v1/reconstructions/${RECONSTRUCTION_ID}/retry" \
+        -H "Content-Type: application/json" \
+        -d "{\"params\": ${NEW_PARAMS}}" 2>&1) || true
     echo "$RETRY_OUTPUT"
 
-    # Wait for the pipeline to finish (agent may time out before training ends)
+    # Wait for the pipeline to finish
     JOB_STATUS=$(wait_for_completion "$RECONSTRUCTION_ID" 30 7200 | tail -1 || true)
     echo ""
     echo "[orchestrator] Job status after retry: $JOB_STATUS"

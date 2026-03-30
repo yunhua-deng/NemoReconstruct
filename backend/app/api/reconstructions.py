@@ -70,6 +70,19 @@ def build_processing_params(
     collision_mesh_target_faces: int | None = None,
     collision_mesh_alpha: float | None = None,
     collision_mesh_downsample: int | None = None,
+    tsdf_mesh_enabled: bool | None = None,
+    tsdf_voxel_size: float | None = None,
+    tsdf_truncation_distance: float | None = None,
+    tsdf_depth_image_size: int | None = None,
+    tsdf_splat_radius: int | None = None,
+    tsdf_target_faces: int | None = None,
+    tsdf_downsample: int | None = None,
+    mesh_extraction_method: str | None = None,
+    mesh_truncation_margin: float | None = None,
+    mesh_grid_shell_thickness: float | None = None,
+    mesh_dlnr_backbone: str | None = None,
+    mesh_image_downsample_factor: int | None = None,
+    mesh_embed_in_usdz: bool | None = None,
 ) -> ReconstructionParams:
     try:
         return ReconstructionParams(
@@ -91,6 +104,19 @@ def build_processing_params(
             collision_mesh_target_faces=collision_mesh_target_faces,
             collision_mesh_alpha=collision_mesh_alpha,
             collision_mesh_downsample=collision_mesh_downsample,
+            tsdf_mesh_enabled=tsdf_mesh_enabled,
+            tsdf_voxel_size=tsdf_voxel_size,
+            tsdf_truncation_distance=tsdf_truncation_distance,
+            tsdf_depth_image_size=tsdf_depth_image_size,
+            tsdf_splat_radius=tsdf_splat_radius,
+            tsdf_target_faces=tsdf_target_faces,
+            tsdf_downsample=tsdf_downsample,
+            mesh_extraction_method=mesh_extraction_method,
+            mesh_truncation_margin=mesh_truncation_margin,
+            mesh_grid_shell_thickness=mesh_grid_shell_thickness,
+            mesh_dlnr_backbone=mesh_dlnr_backbone,
+            mesh_image_downsample_factor=mesh_image_downsample_factor,
+            mesh_embed_in_usdz=mesh_embed_in_usdz,
         )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors())
@@ -186,6 +212,19 @@ def create_from_dataset(
     collision_mesh_target_faces: int | None = Form(None),
     collision_mesh_alpha: float | None = Form(None),
     collision_mesh_downsample: int | None = Form(None),
+    tsdf_mesh_enabled: bool | None = Form(None),
+    tsdf_voxel_size: float | None = Form(None),
+    tsdf_truncation_distance: float | None = Form(None),
+    tsdf_depth_image_size: int | None = Form(None),
+    tsdf_splat_radius: int | None = Form(None),
+    tsdf_target_faces: int | None = Form(None),
+    tsdf_downsample: int | None = Form(None),
+    mesh_extraction_method: str | None = Form(None),
+    mesh_truncation_margin: float | None = Form(None),
+    mesh_grid_shell_thickness: float | None = Form(None),
+    mesh_dlnr_backbone: str | None = Form(None),
+    mesh_image_downsample_factor: int | None = Form(None),
+    mesh_embed_in_usdz: bool | None = Form(None),
     db: Session = Depends(get_db),
 ) -> UploadResponse:
     dataset_path = (settings.data_dir / dataset_name).resolve()
@@ -204,6 +243,10 @@ def create_from_dataset(
         grut_render_method, grut_strategy, grut_downsample_factor,
         splat_only_mode, collision_mesh_enabled, collision_mesh_method,
         collision_mesh_target_faces, collision_mesh_alpha, collision_mesh_downsample,
+        tsdf_mesh_enabled, tsdf_voxel_size, tsdf_truncation_distance,
+        tsdf_depth_image_size, tsdf_splat_radius, tsdf_target_faces, tsdf_downsample,
+        mesh_extraction_method, mesh_truncation_margin, mesh_grid_shell_thickness,
+        mesh_dlnr_backbone, mesh_image_downsample_factor, mesh_embed_in_usdz,
     )
 
     reconstruction = Reconstruction(
@@ -269,6 +312,19 @@ def upload_reconstruction(
     collision_mesh_target_faces: int | None = Form(None),
     collision_mesh_alpha: float | None = Form(None),
     collision_mesh_downsample: int | None = Form(None),
+    tsdf_mesh_enabled: bool | None = Form(None),
+    tsdf_voxel_size: float | None = Form(None),
+    tsdf_truncation_distance: float | None = Form(None),
+    tsdf_depth_image_size: int | None = Form(None),
+    tsdf_splat_radius: int | None = Form(None),
+    tsdf_target_faces: int | None = Form(None),
+    tsdf_downsample: int | None = Form(None),
+    mesh_extraction_method: str | None = Form(None),
+    mesh_truncation_margin: float | None = Form(None),
+    mesh_grid_shell_thickness: float | None = Form(None),
+    mesh_dlnr_backbone: str | None = Form(None),
+    mesh_image_downsample_factor: int | None = Form(None),
+    mesh_embed_in_usdz: bool | None = Form(None),
     db: Session = Depends(get_db),
 ) -> UploadResponse:
     suffix = Path(file.filename or "upload.mov").suffix.lower()
@@ -294,6 +350,19 @@ def upload_reconstruction(
         collision_mesh_target_faces,
         collision_mesh_alpha,
         collision_mesh_downsample,
+        tsdf_mesh_enabled,
+        tsdf_voxel_size,
+        tsdf_truncation_distance,
+        tsdf_depth_image_size,
+        tsdf_splat_radius,
+        tsdf_target_faces,
+        tsdf_downsample,
+        mesh_extraction_method,
+        mesh_truncation_margin,
+        mesh_grid_shell_thickness,
+        mesh_dlnr_backbone,
+        mesh_image_downsample_factor,
+        mesh_embed_in_usdz,
     )
 
     reconstruction = Reconstruction(
