@@ -109,10 +109,10 @@ def start_workflow(
     env_vars = {
         "WORKFLOW_ID": w.id,
         "WORKFLOW_API_URL": "http://127.0.0.1:8010",
-        "AGENT_TIMEOUT": "600",
         "ACCEPT_PSNR_THRESHOLD": str(w.accept_psnr_threshold),
         "ACCEPT_SSIM_THRESHOLD": str(w.accept_ssim_threshold),
         "INITIAL_BACKEND": reconstruction_backend,
+        "AGENT_TIMEOUT": "300",
     }
 
     proc_env = os.environ.copy()
@@ -180,10 +180,10 @@ def start_workflow_from_dataset(
     env_vars = {
         "WORKFLOW_ID": w.id,
         "WORKFLOW_API_URL": "http://127.0.0.1:8010",
-        "AGENT_TIMEOUT": "600",
         "ACCEPT_PSNR_THRESHOLD": str(w.accept_psnr_threshold),
         "ACCEPT_SSIM_THRESHOLD": str(w.accept_ssim_threshold),
         "INITIAL_BACKEND": reconstruction_backend,
+        "AGENT_TIMEOUT": "300",
     }
 
     proc_env = os.environ.copy()

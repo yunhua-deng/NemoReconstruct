@@ -1,15 +1,22 @@
-# OpenShell Sandbox Policy — NemoClaw Evaluator Agent
+# OpenShell Sandbox Policy — NemoClaw Agents
 #
-# The Evaluator Agent runs in an isolated sandbox after each reconstruction
-# completes. It has access to:
-#   - NemoReconstruct backend API (port 8010) — fetch metrics, details, iterations
-#   - Reconstruction output files (mounted at /sandbox/reconstruction_data/)
+# Shared by both agents in the orchestrate.sh loop:
+#
+#   Agent A (Runner)    — uploads video, starts reconstruction, polls status
+#   Agent B (Evaluator) — reads metrics, analyzes quality, suggests improvements
+#
+# Both agents run in isolated sandboxes with identical permissions.
+# Each sandbox is ephemeral — created for one task, then destroyed.
+#
+# What they CAN access:
+#   - NemoReconstruct backend API (port 8010) — via curl
 #   - OpenClaw gateway (port 18789) — agent harness + LLM inference
 #   - /sandbox (read-write) and /tmp (scratch space)
 #
-# It CANNOT access:
-#   - Host filesystem (no /home, etc.)
+# What they CANNOT access:
+#   - Host filesystem (no access to /home, etc.)
 #   - Other network services (no internet, no SSH, no arbitrary ports)
+#   - Each other (each agent is a fresh sandbox)
 
 version: 1
 
@@ -42,7 +49,7 @@ process:
 network_policies:
 
   # 1. NemoReconstruct backend API
-  #    Used by: Evaluator agent to fetch reconstruction data via curl
+  #    Used by: Agent A (upload, poll, retry) and Agent B (read metrics)
   #    Host address: 172.20.0.1 is the Docker gateway (host) IP
   nemo_reconstruct:
     name: nemo-reconstruct
@@ -57,7 +64,8 @@ network_policies:
       - path: /bin/bash
 
   # 2. OpenClaw gateway (required)
-  #    Handles agent harness communication + LLM inference
+  #    Handles agent harness communication
+  #    Used by: Agent A and Agent B
   openclaw_gateway:
     name: openclaw-gateway
     endpoints:

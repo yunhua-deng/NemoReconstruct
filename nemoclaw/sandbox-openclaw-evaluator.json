@@ -1,15 +1,4 @@
 {
-  "_comment": [
-    "OpenClaw config template — copy and customize for your project:",
-    "  cp sandbox-openclaw-template.json sandbox-openclaw.json",
-    "",
-    "This tells the OpenClaw agent harness (inside the sandbox) how to",
-    "reach the LLM and what tools are available. Both Agent A and Agent B",
-    "use this same config.",
-    "",
-    "CHANGE: model id/name to match your Ollama model (ollama list)",
-    "CHANGE: workspace path to match your --upload target"
-  ],
   "models": {
     "mode": "merge",
     "providers": {
@@ -18,12 +7,12 @@
         "api": "openai-completions",
         "models": [
           {
-            "id": "glm-4.7-flash",
-            "name": "glm-4.7-flash",
+            "id": "nemotron-3-nano",
+            "name": "nemotron-3-nano",
             "reasoning": false,
             "input": ["text"],
             "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "contextWindow": 128000,
+            "contextWindow": 32768,
             "maxTokens": 8192
           }
         ]
@@ -33,9 +22,9 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "openai/glm-4.7-flash"
+        "primary": "openai/nemotron-3-nano"
       },
-      "workspace": "/sandbox/my-project"
+      "workspace": "/sandbox"
     }
   },
   "tools": {

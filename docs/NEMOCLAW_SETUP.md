@@ -675,12 +675,11 @@ Both sandboxes need the host service endpoint in their respective policies. One 
 | File | Purpose |
 |------|---------|
 | `nemoclaw/sandbox-policy.yaml` | OpenShell sandbox policy — allows backend (:8010) and OpenClaw gateway (:18789) |
-| `nemoclaw/sandbox-openclaw.json` | OpenClaw config — model → `inference.local`, workspace → `/sandbox/NemoReconstruct` |
-| `nemoclaw/runner_prompt.md` | Agent A (Runner) system prompt — executes pipelines |
-| `nemoclaw/evaluator_prompt.md` | Agent B (Evaluator) system prompt — analyzes metrics, suggests parameter changes |
-| `nemoclaw/orchestrate.sh` | Multi-agent orchestrator — drives the Agent A → Agent B loop |
-| `nemoclaw/single_agent_prompt.md` | Standalone agent prompt — for ad-hoc single-agent use |
-| `nemoclaw/example_session.py` | Python SDK script to test the pipeline without an agent |
+| `nemoclaw/sandbox-openclaw-agent-a.json` | OpenClaw config for Agent A (Runner) — model → `nemotron-3-nano` |
+| `nemoclaw/sandbox-openclaw-agent-b.json` | OpenClaw config for Agent B (Evaluator) — model → `nemotron-3-nano` |
+| `nemoclaw/agent-a-prompt.md` | Agent A (Runner) system prompt — executes pipelines via API |
+| `nemoclaw/agent-b-prompt.md` | Agent B (Evaluator) system prompt — analyzes metrics, suggests parameter changes |
+| `nemoclaw/orchestrate.sh` | Multi-agent orchestrator — drives the Agent A → Agent B loop using LLM agents |
 | `nemoclaw/sandbox-policy-template.yaml` | Generic sandbox policy — copy and customize for your own project (Part 2) |
 | `nemoclaw/sandbox-openclaw-template.json` | Generic OpenClaw config — copy and customize for your own project (Part 2) |
 
@@ -740,6 +739,58 @@ make backend-dev
 3. **Iteration 2:** Runner agent retries the reconstruction with the evaluator's suggested parameters. Polls until complete.
 4. **Evaluation 2:** Evaluator analyzes the new results. Accepts or suggests further changes.
 5. Repeat up to `max_iterations` times.
+
+### Monitoring & Audit Trail
+
+Every orchestrator run automatically writes a timestamped log to `nemoclaw/logs/`:
+
+```bash
+# Logs are created automatically — check the latest one:
+ls -lt nemoclaw/logs/
+```
+
+The log includes full agent output and a **sandbox audit trail** for each agent invocation, showing every policy allow/deny decision in real time.
+
+#### Live monitoring during a run
+
+While the orchestrator is running, each agent gets a named sandbox (`nemoclaw-agent-a-iter1`, `nemoclaw-agent-b-iter1`, etc.). You can stream logs live:
+
+```bash
+# Watch Agent A (Runner) sandbox audit trail in real time
+openshell logs nemoclaw-agent-a-iter1 --source sandbox --tail
+
+# Watch Agent B (Evaluator) sandbox audit trail
+openshell logs nemoclaw-agent-b-iter1 --source sandbox --tail
+
+# Filter to only policy decisions (allow/deny)
+openshell logs nemoclaw-agent-a-iter1 --source sandbox --tail 2>/dev/null \
+  | grep "action="
+```
+
+#### View audit trail after a run
+
+The orchestrator captures the audit trail into the log file automatically. You can also review it manually:
+
+```bash
+# Show all policy decisions for the last Agent A sandbox
+openshell logs nemoclaw-agent-a-iter1 --source sandbox -n 500 \
+  | grep "action="
+
+# Show gateway-level events
+openshell logs nemoclaw-agent-a-iter1 --source gateway -n 100
+```
+
+Each audit line includes:
+
+| Field | Example | Description |
+|-------|---------|-------------|
+| `action` | `allow` / `deny` | Policy verdict |
+| `binary` | `/usr/bin/curl` | Process that made the request |
+| `dst_host` | `172.20.0.1` | Destination host |
+| `dst_port` | `8010` | Destination port |
+| `method` | `GET` | HTTP method |
+| `path` | `/health` | Request path |
+| `policy` | `nemo_reconstruct` | Policy name that made the decision |
 
 ---
 

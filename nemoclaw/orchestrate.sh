@@ -1,34 +1,33 @@
 #!/usr/bin/env bash
-# orchestrate.sh — Multi-agent iterative reconstruction workflow
+# orchestrate.sh — Iterative reconstruction workflow
 #
-# Drives two sandboxed agents in a loop:
-#   1. Runner agent: executes the reconstruction pipeline
-#   2. Evaluator agent: analyzes metrics and suggests parameter improvements
-#
-# The backend API (on the host) is the shared coordination layer.
-# Each agent runs in its own isolated OpenShell sandbox.
+# Flow:
+#   1. Start reconstruction (direct API call)
+#   2. Wait for completion
+#   3. Evaluator agent runs in OpenShell sandbox (inspects metrics, files, API)
+#   4. If ITERATE → retry with recommended params → goto 2
+#   5. Repeat until ACCEPT or max iterations reached
 #
 # Usage:
 #   ./nemoclaw/orchestrate.sh <video_path> <scene_name> [max_iterations]
-#
-# Example:
-#   ./nemoclaw/orchestrate.sh ~/videos/my_scene.MOV "kitchen-scan" 3
+#   ./nemoclaw/orchestrate.sh --dataset <dataset_name> <scene_name> [max_iterations]
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-POLICY="$SCRIPT_DIR/sandbox-policy.yaml"
-OPENCLAW_CONFIG="$SCRIPT_DIR/sandbox-openclaw.json"
-API_HOST="172.20.0.1"
-API_PORT="8010"
-API_URL="http://${API_HOST}:${API_PORT}"
-WORKFLOW_API_URL="${WORKFLOW_API_URL:-http://127.0.0.1:${API_PORT}}"
+API_PORT="${API_PORT:-8010}"
+API_URL="${API_URL:-http://127.0.0.1:${API_PORT}}"
+WORKFLOW_API_URL="${WORKFLOW_API_URL:-$API_URL}"
 WORKFLOW_ID="${WORKFLOW_ID:-}"
 
-# Support two modes:
-#   1. Video mode:   orchestrate.sh <video_path> <scene_name> [max_iterations]
-#   2. Dataset mode:  orchestrate.sh --dataset <dataset_name> <scene_name> [max_iterations]
+# LLM / Agent config
+OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-nemotron-3-nano}"
+AGENT_TIMEOUT="${AGENT_TIMEOUT:-300}"
+RUN_AGENT_RETRIES="${RUN_AGENT_RETRIES:-2}"
+
+# Parse arguments
 DATASET_MODE=false
 DATASET_NAME=""
 VIDEO_PATH=""
@@ -44,32 +43,34 @@ else
     MAX_ITERATIONS="${3:-3}"
 fi
 
-TIMEOUT="${AGENT_TIMEOUT:-1200}"
 ACCEPT_PSNR="${ACCEPT_PSNR_THRESHOLD:-25.0}"
 ACCEPT_SSIM="${ACCEPT_SSIM_THRESHOLD:-0.85}"
 
-# Track active reconstruction backend across iterations
 if [[ "$DATASET_MODE" == "true" ]]; then
     CURRENT_BACKEND="${INITIAL_BACKEND:-fvdb}"
 else
     CURRENT_BACKEND="${INITIAL_BACKEND:-3dgrut}"
 fi
 
-# Clean up OpenClaw persona scaffolds that get dropped into $PWD
-rm -f "$REPO_DIR"/{AGENTS,HEARTBEAT,IDENTITY,SOUL,TOOLS,USER}.md 2>/dev/null || true
+# --- Logging ---
+LOG_DIR="$SCRIPT_DIR/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/${SCENE_NAME}_$(date +%Y-%m-%d_%H-%M-%S).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "[orchestrator] Log file: $LOG_FILE"
 
 # Validate inputs
 if [[ "$DATASET_MODE" == "false" ]]; then
     if [[ ! -f "$VIDEO_PATH" ]]; then
-        echo "Error: Video file not found: $VIDEO_PATH"
+        echo "[orchestrator] ERROR: Video file not found: $VIDEO_PATH"
         exit 1
     fi
-    # Resolve to absolute path
     VIDEO_PATH="$(cd "$(dirname "$VIDEO_PATH")" && pwd)/$(basename "$VIDEO_PATH")"
 fi
 
+echo ""
 echo "============================================"
-echo " NemoClaw Multi-Agent Reconstruction"
+echo " NemoReconstruct — Iterative Workflow"
 echo "============================================"
 if [[ "$DATASET_MODE" == "true" ]]; then
 echo " Dataset:        $DATASET_NAME"
@@ -78,157 +79,37 @@ echo " Video:          $VIDEO_PATH"
 fi
 echo " Scene:          $SCENE_NAME"
 echo " Max iterations: $MAX_ITERATIONS"
+echo " Backend:        $CURRENT_BACKEND"
 echo " PSNR threshold: $ACCEPT_PSNR"
 echo " SSIM threshold: $ACCEPT_SSIM"
 echo " API:            $API_URL"
+echo " LLM:            $OLLAMA_URL ($OLLAMA_MODEL)"
+echo " Agent timeout:   ${AGENT_TIMEOUT}s (retries: $RUN_AGENT_RETRIES)"
 echo "============================================"
 echo ""
 
-# Health check
-echo "[orchestrator] Checking backend health..."
-HEALTH=$(curl -sf "${API_URL}/health" 2>/dev/null || echo "FAILED")
-if [[ "$HEALTH" == "FAILED" ]]; then
-    echo "[orchestrator] ERROR: Backend is not running at $API_URL"
-    echo "[orchestrator] Start it with: make backend-dev"
-    exit 1
-fi
-echo "[orchestrator] Backend healthy: $HEALTH"
-echo ""
+# ── Helpers ─────────────────────────────────────────────
 
-# Ensure the sandbox container image is cached and ready.
-# On a cold start the openclaw image needs to be pulled from ghcr.io, which
-# can take minutes. This function creates a throwaway sandbox with a generous
-# timeout, retrying if necessary, so that all subsequent sandbox creates are
-# near-instant.
-SANDBOX_WARMUP_TIMEOUT="${SANDBOX_WARMUP_TIMEOUT:-600}"  # 10 min for image pull
-SANDBOX_WARMUP_RETRIES="${SANDBOX_WARMUP_RETRIES:-3}"
-
-ensure_sandbox_ready() {
-    echo "[orchestrator] Ensuring sandbox image is cached..."
-
-    # Quick test: try to create a sandbox that just runs 'echo ok'.
-    # If the image is cached this completes in ~5s.
-    local quick_output
-    quick_output=$(timeout 30s openshell sandbox create \
-        --from openclaw --no-keep \
-        -- echo "sandbox-ok" 2>&1) || true
-
-    if echo "$quick_output" | grep -q "sandbox-ok"; then
-        echo "[orchestrator] Sandbox image ready (cached)."
-        return 0
-    fi
-
-    echo "[orchestrator] Image not cached — pulling (this may take a few minutes)..."
-
-    for ((attempt=1; attempt<=SANDBOX_WARMUP_RETRIES; attempt++)); do
-        echo "[orchestrator] Warmup attempt $attempt/$SANDBOX_WARMUP_RETRIES (timeout: ${SANDBOX_WARMUP_TIMEOUT}s)..."
-
-        local warmup_output
-        warmup_output=$(timeout "${SANDBOX_WARMUP_TIMEOUT}s" openshell sandbox create \
-            --from openclaw --no-keep \
-            -- echo "sandbox-ok" 2>&1) || true
-
-        if echo "$warmup_output" | grep -q "sandbox-ok"; then
-            echo "[orchestrator] Sandbox image ready after warmup."
-            return 0
-        fi
-
-        echo "[orchestrator] Warmup attempt $attempt failed."
-        if [[ $attempt -lt $SANDBOX_WARMUP_RETRIES ]]; then
-            echo "[orchestrator] Waiting 30s before next attempt..."
-            sleep 30
-        fi
-    done
-
-    echo "[orchestrator] WARNING: Could not warm up sandbox image after $SANDBOX_WARMUP_RETRIES attempts."
-    echo "[orchestrator] Continuing anyway — sandbox creates may fail."
-    return 1
+update_workflow() {
+    if [[ -z "$WORKFLOW_ID" ]]; then return; fi
+    curl -sf -X PATCH "${WORKFLOW_API_URL}/api/v1/workflows/${WORKFLOW_ID}/state" \
+        -H "Content-Type: application/json" \
+        -d "$1" >/dev/null 2>&1 || true
 }
 
-# Warm up sandbox image before entering the main loop
-ensure_sandbox_ready || true
-echo ""
-
-# Helper: run a sandboxed agent with a message.
-# Retries sandbox creation up to 3 times if the sandbox fails to start
-# (e.g. image pull still in progress, transient infrastructure error).
-RUN_AGENT_RETRIES="${RUN_AGENT_RETRIES:-3}"
-RUN_AGENT_RETRY_DELAY="${RUN_AGENT_RETRY_DELAY:-30}"
-
-run_agent() {
-    local session_id="$1"
-    local message="$2"
-    local prompt_file="$3"
-
-    # Build a lightweight staging dir with only what the sandbox needs:
-    # the nemoclaw config files and the video. This avoids uploading the
-    # entire repo (backend/storage alone is multi-GB).
-    local stage_dir
-    stage_dir=$(mktemp -d)
-    # Clean up staging dir on return
-    trap "rm -rf '$stage_dir'" RETURN
-
-    cp -a "$SCRIPT_DIR" "$stage_dir/nemoclaw"
-    # Only link the video file if we have one (video mode, not dataset mode)
-    if [[ -n "$VIDEO_PATH" && -f "$VIDEO_PATH" ]]; then
-        ln -s "$VIDEO_PATH" "$stage_dir/$(basename "$VIDEO_PATH")"
-    fi
-
-    # Override personality/workspace files from the openclaw image with minimal
-    # stubs. The defaults (AGENTS.md, SOUL.md, etc.) add ~13K chars to the
-    # system prompt, which slows inference on local LLMs dramatically.
-    echo "You are a task runner. Follow instructions precisely." > "$stage_dir/AGENTS.md"
-    for f in SOUL.md TOOLS.md IDENTITY.md USER.md HEARTBEAT.md BOOTSTRAP.md; do
-        : > "$stage_dir/$f"  # empty files
-    done
-
-    # Use 'timeout' as a safety net. Send SIGTERM first, then SIGKILL after 60s
-    # if the process doesn't exit. This lets openclaw write its JSON output on
-    # graceful shutdown. Allow 300s margin for upload/bootstrap/shutdown.
-    local hard_timeout=$(( TIMEOUT + 300 ))
-
-    for ((agent_try=1; agent_try<=RUN_AGENT_RETRIES; agent_try++)); do
-        local output
-        output=$(timeout --signal=TERM --kill-after=60 "${hard_timeout}s" \
-        openshell sandbox create \
-            --from openclaw \
-            --policy "$POLICY" \
-            --no-git-ignore \
-            --upload "$stage_dir:/sandbox/NemoReconstruct" \
-            -- bash -c "
-mkdir -p /sandbox/.openclaw
-cp /sandbox/NemoReconstruct/nemoclaw/sandbox-openclaw.json /sandbox/.openclaw/openclaw.json
-export OPENAI_API_KEY=unused
-cd /sandbox/NemoReconstruct
-openclaw agent --local --session-id $session_id \
-    --message \"$(echo "$message" | sed 's/"/\\"/g')\" \
-    --json --timeout $TIMEOUT
-" 2>&1) || true
-
-        # Check if the sandbox actually produced agent output (not just an error)
-        if echo "$output" | grep -qE '[0-9a-f]{8}-[0-9a-f]{4}|"status"|completed|failed|reconstruction'; then
-            echo "$output"
-            return 0
-        fi
-
-        echo "[orchestrator] Sandbox attempt $agent_try/$RUN_AGENT_RETRIES produced no usable output." >&2
-        if [[ $agent_try -lt $RUN_AGENT_RETRIES ]]; then
-            echo "[orchestrator] Retrying in ${RUN_AGENT_RETRY_DELAY}s..." >&2
-            sleep "$RUN_AGENT_RETRY_DELAY"
-        fi
-    done
-
-    # All retries exhausted — return last output (may be empty)
-    echo "$output"
+save_notes() {
+    local reconstruction_id="$1" notes="$2"
+    local json_body
+    json_body=$(python3 -c "import json,sys; print(json.dumps({'notes': sys.argv[1]}))" "$notes" 2>/dev/null || echo '{"notes":""}')
+    curl -sf -X PATCH "${API_URL}/api/v1/reconstructions/${reconstruction_id}/notes" \
+        -H "Content-Type: application/json" \
+        -d "$json_body" >/dev/null 2>&1 || true
 }
 
-# Wait for reconstruction to reach a terminal state (completed or failed).
-# The runner agent may time out before the pipeline finishes training, so
-# the orchestrator must poll independently before proceeding to the evaluator.
 wait_for_completion() {
     local reconstruction_id="$1"
     local poll_interval="${2:-30}"
-    local max_wait="${3:-2400}"  # 40 minutes default
+    local max_wait="${3:-7200}"
     local elapsed=0
 
     while (( elapsed < max_wait )); do
@@ -237,631 +118,425 @@ wait_for_completion() {
             | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])" 2>/dev/null || echo "unknown")
 
         if [[ "$status" == "completed" || "$status" == "failed" ]]; then
-            echo "[orchestrator] Pipeline finished with status: $status (waited ${elapsed}s)"
+            echo "[orchestrator] Pipeline finished: status=$status (${elapsed}s)" >&2
             echo "$status"
             return 0
         fi
 
-        echo "[orchestrator] Pipeline still running (status=$status, ${elapsed}s elapsed)..."
+        echo "[orchestrator] Pipeline running (status=$status, ${elapsed}s elapsed)..." >&2
         sleep "$poll_interval"
         (( elapsed += poll_interval ))
     done
 
-    echo "[orchestrator] WARNING: Pipeline did not finish within ${max_wait}s"
+    echo "[orchestrator] WARNING: Pipeline did not finish within ${max_wait}s" >&2
     echo "timeout"
     return 1
 }
 
-# Extract reconstruction ID from agent output
-extract_id() {
-    grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1 || true
-}
-
-# Extract evaluator verdict from agent output
-extract_verdict() {
-    python3 -c "
-import sys, json, re
-text = sys.stdin.read()
-
-def extract_json_objects(s):
-    results = []
-    i = 0
-    while i < len(s):
-        if s[i] == '{':
-            for end in range(len(s)-1, i, -1):
-                if s[end] == '}':
-                    try:
-                        results.append(json.loads(s[i:end+1]))
-                        i = end + 1
-                        break
-                    except: pass
-            else:
-                i += 1
-                continue
-            continue
-        i += 1
-    return results
-
-def find_all_strings(obj):
-    if isinstance(obj, str): return [obj]
-    if isinstance(obj, list): return [s for item in obj for s in find_all_strings(item)]
-    if isinstance(obj, dict): return [s for v in obj.values() for s in find_all_strings(v)]
-    return []
-
-cleaned = re.sub(r'\`\`\`[a-z]*\n?', '', text)
-objects = extract_json_objects(cleaned)
-for obj in list(objects):
-    for s in find_all_strings(obj):
-        if '{' in s:
-            objects.extend(extract_json_objects(s))
-
-for obj in reversed(objects):
-    v = obj.get('verdict', '').upper()
-    if v in ('ACCEPT', 'ITERATE'):
-        print(v)
-        sys.exit(0)
-
-if re.search(r'\bACCEPT\b', text):
-    print('ACCEPT')
-elif re.search(r'\bITERATE\b', text):
-    print('ITERATE')
-else:
-    print('UNKNOWN')
-" 2>/dev/null || echo "UNKNOWN"
-}
-
-# Extract evaluator reasoning/notes from agent output
-extract_reason() {
-    python3 -c "
-import sys, json, re
-text = sys.stdin.read()
-cleaned = re.sub(r'\`\`\`[a-z]*\n?', '', text)
-
-def extract_json_objects(s):
-    results = []
-    depth = 0
-    start = None
-    for i, c in enumerate(s):
-        if c == '{':
-            if depth == 0: start = i
-            depth += 1
-        elif c == '}':
-            depth -= 1
-            if depth == 0 and start is not None:
-                try: results.append(json.loads(s[start:i+1]))
-                except: pass
-                start = None
-    return results
-
-def find_all_strings(obj):
-    if isinstance(obj, str):
-        return [obj]
-    if isinstance(obj, list):
-        r = []
-        for item in obj:
-            r.extend(find_all_strings(item))
-        return r
-    if isinstance(obj, dict):
-        r = []
-        for v in obj.values():
-            r.extend(find_all_strings(v))
-        return r
-    return []
-
-objects = extract_json_objects(cleaned)
-all_strings = []
-for obj in list(objects):
-    for s in find_all_strings(obj):
-        all_strings.append(s)
-        if '{' in s:
-            objects.extend(extract_json_objects(s))
-
-# Strategy 1: find reason key in parsed JSON objects
-for obj in reversed(objects):
-    for key in ('reason', 'reasoning', 'analysis', 'explanation', 'notes'):
-        if key in obj and isinstance(obj[key], str):
-            print(obj[key][:500])
-            sys.exit(0)
-
-# Strategy 2: regex extract reason from extracted strings (handles truncated JSON)
-for s in reversed(all_strings):
-    m = re.search(r'\"reason\"\s*:\s*\"((?:[^\"\\\\]|\\\\.)*)\"', s)
-    if m:
-        val = m.group(1).replace('\\\\n', ' ').replace('\\\\\"', '\"').strip()
-        if len(val) > 5:
-            print(val[:500])
-            sys.exit(0)
-
-# Strategy 3: extract the last substantial line (skip JSON fragments)
-lines = [l.strip() for l in text.splitlines() if l.strip() and len(l.strip()) > 3 and not re.match(r'^[\[\]{},\s]*$', l.strip())]
-if lines:
-    print(lines[-1][:500])
-else:
-    print('No analysis available')
-" 2>/dev/null || echo "No analysis available"
-}
-
-# Save notes to a reconstruction via the API
-save_notes() {
+# Launch evaluator agent in an OpenShell sandbox.
+# The agent has autonomous access to:
+#   - Backend API (fetch metrics, details, iterations via curl)
+#   - Reconstruction output files (mounted at /sandbox/reconstruction_data/)
+#   - Local LLM via OpenClaw agent framework
+run_evaluator_agent() {
     local reconstruction_id="$1"
-    local notes="$2"
-    curl -sf -X PATCH "${API_URL}/api/v1/reconstructions/${reconstruction_id}/notes" \
-        -H "Content-Type: application/json" \
-        -d "$(python3 -c "import json; print(json.dumps({'notes': $(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$notes")}))")" \
-        >/dev/null 2>&1 || true
+    local backend="$2"
+    local iteration="$3"
+
+    # Stage files for sandbox upload
+    local stage_dir
+    stage_dir=$(mktemp -d)
+
+    # Write OpenClaw config with the configured model
+    cat > "$stage_dir/openclaw.json" << CONFEOF
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "openai": {
+        "baseUrl": "https://inference.local/v1",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "${OLLAMA_MODEL}",
+            "name": "${OLLAMA_MODEL}",
+            "reasoning": true,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 32768,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "openai/${OLLAMA_MODEL}"
+      },
+      "workspace": "/sandbox/stage"
+    }
+  },
+  "tools": {
+    "profile": "coding",
+    "deny": ["web_fetch"]
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true,
+    "ownerDisplay": "raw"
+  },
+  "gateway": {
+    "port": 18789,
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {
+      "mode": "none"
+    }
+  }
+}
+CONFEOF
+
+    # Copy policy and instructions
+    cp "$SCRIPT_DIR/sandbox-policy.yaml" "$stage_dir/policy.yaml"
+    cp "$SCRIPT_DIR/agent-b-prompt.md" "$stage_dir/instructions.md"
+
+    # Compute thresholds
+    local ssimloss_threshold
+    ssimloss_threshold=$(python3 -c "print(round(1.0 - ${ACCEPT_SSIM}, 4))")
+    local loss_threshold="${LOSS_THRESHOLD:-0.25}"
+
+    # Write the task-specific message
+    cat > "$stage_dir/message.txt" << MSGEOF
+Evaluate reconstruction ${reconstruction_id} (backend: ${backend}).
+
+## API Access
+Use curl to fetch data from the backend API:
+  curl -s http://172.20.0.1:${API_PORT}/api/v1/reconstructions/${reconstruction_id}
+  curl -s http://172.20.0.1:${API_PORT}/api/v1/reconstructions/${reconstruction_id}/metrics
+  curl -s http://172.20.0.1:${API_PORT}/api/v1/reconstructions/${reconstruction_id}/iterations
+
+## Thresholds
+For 3DGRUT: PSNR > ${ACCEPT_PSNR}, SSIM > ${ACCEPT_SSIM}
+For fVDB: loss < ${loss_threshold}, ssimloss < ${ssimloss_threshold}
+
+After your investigation, output ONLY a JSON verdict block.
+MSGEOF
+
+    # Write the runner script that executes inside the sandbox
+    cat > "$stage_dir/run.sh" << 'RUNEOF'
+#!/bin/bash
+set -e
+mkdir -p /sandbox/.openclaw
+cp /sandbox/stage/openclaw.json /sandbox/.openclaw/openclaw.json
+export OPENAI_API_KEY=unused
+
+# Remove OpenClaw template files that distract the agent
+rm -f /sandbox/AGENTS.md /sandbox/SOUL.md /sandbox/BOOTSTRAP.md \
+      /sandbox/USER.md /sandbox/TOOLS.md /sandbox/IDENTITY.md \
+      /sandbox/HEARTBEAT.md /sandbox/MEMORY.md 2>/dev/null || true
+
+cd /sandbox/stage
+
+# Combine instructions + task into the agent message
+INSTRUCTIONS=$(cat /sandbox/stage/instructions.md)
+TASK=$(cat /sandbox/stage/message.txt)
+MESSAGE="${INSTRUCTIONS}
+
+---
+
+${TASK}"
+
+openclaw agent --local --session-id evaluator \
+    --message "$MESSAGE" \
+    --json \
+    --timeout "${1:-300}"
+RUNEOF
+    chmod +x "$stage_dir/run.sh"
+
+    # Build the openshell command
+    local sb_cmd="openshell sandbox create"
+    sb_cmd+=" --from openclaw"
+    sb_cmd+=" --no-keep"
+    sb_cmd+=" --no-git-ignore"
+    sb_cmd+=" --policy ${stage_dir}/policy.yaml"
+    sb_cmd+=" --upload ${stage_dir}:/sandbox/stage"
+    sb_cmd+=" -- bash /sandbox/stage/run.sh ${AGENT_TIMEOUT}"
+
+    echo "[orchestrator] Staging evaluator sandbox (timeout=${AGENT_TIMEOUT}s)..." >&2
+
+    # Run agent in sandbox with PTY (required by OpenClaw)
+    local output=""
+    local attempt=0
+    while (( attempt < RUN_AGENT_RETRIES )); do
+        (( attempt++ ))
+        echo "[orchestrator] Evaluator agent attempt ${attempt}/${RUN_AGENT_RETRIES}..." >&2
+
+        output=$( timeout $((AGENT_TIMEOUT + 120)) \
+            setsid script -qefc "$sb_cmd" /dev/null 2>&1 \
+            | tr -d '\r' ) || true
+
+        # Check if we got meaningful output
+        local output_len=${#output}
+        if (( output_len < 100 )); then
+            echo "[orchestrator] Agent output too short (${output_len} bytes), retrying..." >&2
+            sleep 5
+            continue
+        fi
+
+        # Check for empty payloads (agent ran but LLM never responded)
+        if echo "$output" | grep -q '"payloads": \[\]'; then
+            echo "[orchestrator] Agent returned empty payloads (LLM did not respond), retrying..." >&2
+            sleep 5
+            continue
+        fi
+
+        echo "[orchestrator] Agent produced ${output_len} bytes of output" >&2
+        break
+    done
+
+    # Cleanup staging directory
+    rm -rf "$stage_dir"
+
+    echo "$output"
 }
 
-# Update workflow state (if WORKFLOW_ID is set)
-update_workflow() {
-    if [[ -z "$WORKFLOW_ID" ]]; then return; fi
-    local json_body="$1"
-    curl -sf -X PATCH "${WORKFLOW_API_URL}/api/v1/workflows/${WORKFLOW_ID}/state" \
-        -H "Content-Type: application/json" \
-        -d "$json_body" \
-        >/dev/null 2>&1 || true
+# Parse LLM verdict from response text
+# OpenClaw --json wraps the LLM response in {"payloads":[{"text":"..."}],...}
+# Extraction handled by extract_agent_output.py to avoid quoting issues.
+EXTRACT_SCRIPT="${SCRIPT_DIR}/extract_agent_output.py"
+
+extract_verdict() {
+    python3 "$EXTRACT_SCRIPT" verdict 2>/dev/null || echo "UNKNOWN"
 }
 
-# Extract suggested params JSON from evaluator output.
-# Arg $1: current backend (3dgrut or fvdb) — used to filter out
-# params that belong to the wrong backend.
+extract_reason() {
+    python3 "$EXTRACT_SCRIPT" reason 2>/dev/null || echo "No analysis available"
+}
+
 extract_params() {
     local current_backend="${1:-}"
-    python3 -c "
-import sys, json, re
-
-current_backend = '${current_backend}'
-
-VALID_KEYS = {'frame_rate','sequential_matcher_overlap','colmap_mapper_type',
-              'colmap_max_num_features','reconstruction_backend',
-              'fvdb_max_epochs','fvdb_sh_degree','fvdb_image_downsample_factor',
-              'grut_n_iterations','grut_render_method','grut_strategy',
-              'grut_downsample_factor','splat_only_mode',
-              'collision_mesh_enabled','collision_mesh_method',
-              'collision_mesh_target_faces','collision_mesh_alpha',
-              'collision_mesh_downsample',
-              'tsdf_mesh_enabled','tsdf_voxel_size',
-              'tsdf_truncation_distance','tsdf_depth_image_size',
-              'tsdf_splat_radius','tsdf_target_faces','tsdf_downsample'}
-
-GRUT_ONLY = {'grut_n_iterations','grut_render_method','grut_strategy','grut_downsample_factor'}
-FVDB_ONLY = {'fvdb_max_epochs','fvdb_sh_degree','fvdb_image_downsample_factor'}
-
-def filter_for_backend(params):
-    if not current_backend:
-        return params
-    # If switching backends, scope to the NEW backend's params
-    target = params.get('reconstruction_backend', current_backend)
-    if target == '3dgrut':
-        return {k: v for k, v in params.items() if k not in FVDB_ONLY}
-    elif target == 'fvdb':
-        return {k: v for k, v in params.items() if k not in GRUT_ONLY}
-    return params
-
-text = sys.stdin.read()
-
-# Strip markdown code fences
-cleaned = re.sub(r'\`\`\`[a-z]*\n?', '', text)
-
-def extract_json_objects(s):
-    results = []
-    i = 0
-    while i < len(s):
-        if s[i] == '{':
-            for end in range(len(s)-1, i, -1):
-                if s[end] == '}':
-                    try:
-                        results.append(json.loads(s[i:end+1]))
-                        i = end + 1
-                        break
-                    except: pass
-            else:
-                i += 1
-                continue
-            continue
-        i += 1
-    return results
-
-def find_all_strings(obj):
-    if isinstance(obj, str): return [obj]
-    if isinstance(obj, list): return [s for item in obj for s in find_all_strings(item)]
-    if isinstance(obj, dict): return [s for v in obj.values() for s in find_all_strings(v)]
-    return []
-
-objects = extract_json_objects(cleaned)
-for obj in list(objects):
-    for s in find_all_strings(obj):
-        if '{' in s:
-            objects.extend(extract_json_objects(s))
-
-# Strategy 1: find a top-level 'params' dict in any JSON object
-for obj in reversed(objects):
-    if isinstance(obj.get('params'), dict):
-        filtered = {k: v for k, v in obj['params'].items() if k in VALID_KEYS}
-        filtered = filter_for_backend(filtered)
-        if filtered:
-            print(json.dumps(filtered))
-            sys.exit(0)
-
-# Strategy 2: find 'suggested_parameters' or similar keys
-for obj in reversed(objects):
-    for key in ('suggested_parameters', 'recommended_params', 'new_params', 'parameters'):
-        if isinstance(obj.get(key), dict):
-            filtered = {k: v for k, v in obj[key].items() if k in VALID_KEYS}
-            filtered = filter_for_backend(filtered)
-            if filtered:
-                print(json.dumps(filtered))
-                sys.exit(0)
-
-# Strategy 3: find any JSON object that has valid param keys directly
-for obj in reversed(objects):
-    filtered = {k: v for k, v in obj.items() if k in VALID_KEYS}
-    filtered = filter_for_backend(filtered)
-    if filtered:
-        print(json.dumps(filtered))
-        sys.exit(0)
-
-# Strategy 4: look for individual param=value patterns in text
-params = {}
-for key in VALID_KEYS:
-    m = re.search(rf'{key}[\"\\s:=]+\\s*([\\d.]+|true|false)', cleaned, re.IGNORECASE)
-    if m:
-        val = m.group(1)
-        if val.lower() in ('true','false'):
-            params[key] = val.lower() == 'true'
-        elif '.' in val:
-            params[key] = float(val)
-        else:
-            params[key] = int(val)
-if params:
-    params = filter_for_backend(params)
-    print(json.dumps(params))
-else:
-    print('{}')
-" 2>/dev/null || echo "{}"
+    python3 "$EXTRACT_SCRIPT" params "$current_backend" 2>/dev/null || echo "{}"
 }
 
+# Default param escalation when LLM returns empty params
+default_escalation() {
+    local reconstruction_id="$1"
+    curl -sf "${API_URL}/api/v1/reconstructions/${reconstruction_id}" 2>/dev/null | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+pp = d.get('processing_params', {})
+backend = pp.get('reconstruction_backend', '${CURRENT_BACKEND}')
+result = {}
+if backend == 'fvdb':
+    epochs = pp.get('fvdb_max_epochs') or 30
+    ds = pp.get('fvdb_image_downsample_factor') or 4
+    if epochs < 60: result['fvdb_max_epochs'] = min(epochs * 2, 120)
+    elif ds > 1: result['fvdb_image_downsample_factor'] = max(ds // 2, 1)
+    else: result['fvdb_max_epochs'] = min(epochs + 30, 120)
+elif backend == '3dgrut':
+    iters = pp.get('grut_n_iterations') or 5000
+    ds = pp.get('grut_downsample_factor') or 4
+    if iters < 10000: result['grut_n_iterations'] = min(iters * 2, 50000)
+    elif ds > 1: result['grut_downsample_factor'] = max(ds // 2, 1)
+    else: result['grut_n_iterations'] = min(iters + 5000, 50000)
+print(json.dumps(result))
+" 2>/dev/null || echo '{}'
+}
+
+# ── Health Check ────────────────────────────────────────
+
+echo "[orchestrator] Checking backend health..."
+if ! curl -sf "${API_URL}/health" >/dev/null 2>&1; then
+    echo "[orchestrator] ERROR: Backend not running at $API_URL"
+    exit 1
+fi
+echo "[orchestrator] Backend healthy."
+echo ""
+
+# ── Step 1: Start Reconstruction ───────────────────────
+
 echo "============================================"
-echo " Iteration 1: Initial Run"
+echo " Step 1: Start Reconstruction"
 echo "============================================"
+echo ""
 
-update_workflow '{"status":"running","current_agent":"runner","current_step":"uploading and reconstructing","iteration":1}'
+update_workflow '{"status":"running","current_step":"starting reconstruction","iteration":1}'
 
-# ── Runner phase: direct API call ───────────────────────
-# The runner phase issues a deterministic curl call. Using the LLM agent here
-# adds minutes of overhead (multiple slow inference rounds on local models)
-# with no benefit — the API call is fully specified by the orchestrator.
-# The evaluator phase still uses the LLM agent where judgment is needed.
-
-echo "[orchestrator] Starting reconstruction via API..."
-
+# Build form args into an array for safe quoting
+CURL_ARGS=()
 if [[ "$DATASET_MODE" == "true" ]]; then
-    if [[ "$CURRENT_BACKEND" == "fvdb" ]]; then
-        RUNNER_OUTPUT=$(curl -sf "${API_URL}/api/v1/reconstructions/from-dataset" \
-            -F "dataset_name=${DATASET_NAME}" \
-            -F "name=${SCENE_NAME}" \
-            -F "reconstruction_backend=fvdb" \
-            -F "fvdb_max_epochs=${INITIAL_FVDB_EPOCHS:-30}" \
-            -F "fvdb_image_downsample_factor=${INITIAL_FVDB_DS:-4}" \
-            2>&1) || true
-    else
-        RUNNER_OUTPUT=$(curl -sf "${API_URL}/api/v1/reconstructions/from-dataset" \
-            -F "dataset_name=${DATASET_NAME}" \
-            -F "name=${SCENE_NAME}" \
-            -F "reconstruction_backend=${CURRENT_BACKEND}" \
-            -F "grut_n_iterations=${INITIAL_GRUT_ITERS:-5000}" \
-            -F "grut_downsample_factor=${INITIAL_GRUT_DS:-4}" \
-            2>&1) || true
-    fi
+    API_ENDPOINT="${API_URL}/api/v1/reconstructions/from-dataset"
+    CURL_ARGS+=(-F "dataset_name=${DATASET_NAME}" -F "name=${SCENE_NAME}")
 else
-    VIDEO_BASENAME="$(basename "$VIDEO_PATH")"
-    if [[ "$CURRENT_BACKEND" == "fvdb" ]]; then
-        RUNNER_OUTPUT=$(curl -sf "${API_URL}/api/v1/reconstructions/upload" \
-            -F "file=@${VIDEO_PATH}" \
-            -F "name=${SCENE_NAME}" \
-            -F "reconstruction_backend=fvdb" \
-            -F "fvdb_max_epochs=${INITIAL_FVDB_EPOCHS:-30}" \
-            -F "fvdb_image_downsample_factor=${INITIAL_FVDB_DS:-4}" \
-            -F "frame_rate=${INITIAL_FRAME_RATE:-1.0}" \
-            -F "splat_only_mode=${INITIAL_SPLAT_ONLY:-false}" \
-            2>&1) || true
-    else
-        RUNNER_OUTPUT=$(curl -sf "${API_URL}/api/v1/reconstructions/upload" \
-            -F "file=@${VIDEO_PATH}" \
-            -F "name=${SCENE_NAME}" \
-            -F "reconstruction_backend=${CURRENT_BACKEND}" \
-            -F "grut_n_iterations=${INITIAL_GRUT_ITERS:-5000}" \
-            -F "grut_downsample_factor=${INITIAL_GRUT_DS:-4}" \
-            -F "frame_rate=${INITIAL_FRAME_RATE:-1.0}" \
-            -F "splat_only_mode=${INITIAL_SPLAT_ONLY:-false}" \
-            2>&1) || true
-    fi
+    API_ENDPOINT="${API_URL}/api/v1/reconstructions/upload"
+    CURL_ARGS+=(-F "file=@${VIDEO_PATH}" -F "name=${SCENE_NAME}")
+    CURL_ARGS+=(-F "frame_rate=${INITIAL_FRAME_RATE:-1.0}")
+    CURL_ARGS+=(-F "splat_only_mode=${INITIAL_SPLAT_ONLY:-false}")
 fi
 
-echo "$RUNNER_OUTPUT"
+CURL_ARGS+=(-F "reconstruction_backend=${CURRENT_BACKEND}")
+if [[ "$CURRENT_BACKEND" == "fvdb" ]]; then
+    CURL_ARGS+=(-F "fvdb_max_epochs=${INITIAL_FVDB_EPOCHS:-5}")
+    CURL_ARGS+=(-F "fvdb_image_downsample_factor=${INITIAL_FVDB_DS:-8}")
+else
+    CURL_ARGS+=(-F "grut_n_iterations=${INITIAL_GRUT_ITERS:-500}")
+    CURL_ARGS+=(-F "grut_downsample_factor=${INITIAL_GRUT_DS:-8}")
+fi
 
-RECONSTRUCTION_ID=$(echo "$RUNNER_OUTPUT" | extract_id)
+echo "[orchestrator] Starting reconstruction..."
+START_RESPONSE=$(curl -sf "${CURL_ARGS[@]}" "$API_ENDPOINT" 2>&1) || true
+
+RECONSTRUCTION_ID=$(echo "$START_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
 
 if [[ -z "$RECONSTRUCTION_ID" ]]; then
-    echo ""
-    echo "[orchestrator] ERROR: Could not extract reconstruction ID from runner output"
-    update_workflow '{"status":"failed","error_message":"Could not extract reconstruction ID"}'
+    echo "[orchestrator] ERROR: Failed to start reconstruction"
+    echo "[orchestrator] Response: $(echo "$START_RESPONSE" | head -c 500)"
+    update_workflow '{"status":"failed","error_message":"Failed to start reconstruction"}'
     exit 1
 fi
 
-echo ""
 echo "[orchestrator] Reconstruction ID: $RECONSTRUCTION_ID"
 update_workflow "{\"reconstruction_id\":\"${RECONSTRUCTION_ID}\",\"current_step\":\"waiting for reconstruction\"}"
 
-# Wait for the pipeline to actually reach a terminal state.
-# The runner agent may time out before training completes.
+# Wait for completion
 JOB_STATUS=$(wait_for_completion "$RECONSTRUCTION_ID" 30 7200 | tail -1 || true)
-echo "[orchestrator] Job status: $JOB_STATUS"
+echo "[orchestrator] Status: $JOB_STATUS"
 
 if [[ "$JOB_STATUS" == "failed" ]]; then
-    echo "[orchestrator] Initial run failed. Check the run log for diagnostics."
+    echo "[orchestrator] Initial reconstruction failed."
     update_workflow '{"status":"failed","error_message":"Initial reconstruction failed"}'
     exit 1
 fi
-
 if [[ "$JOB_STATUS" == "timeout" ]]; then
-    echo "[orchestrator] Initial run timed out waiting for pipeline. Stopping."
-    update_workflow '{"status":"failed","error_message":"Pipeline did not complete within timeout"}'
+    echo "[orchestrator] Initial reconstruction timed out."
+    update_workflow '{"status":"failed","error_message":"Reconstruction timed out"}'
     exit 1
 fi
 
-# ── Direct evaluator ────────────────────────────────────
-# Like the runner, the evaluator uses direct API calls + deterministic logic
-# instead of an LLM agent. The acceptance criteria and parameter tuning
-# heuristics are well-defined; an LLM adds minutes of overhead on local
-# hardware with no benefit for this domain.
-#
-# Thresholds:
-#   fVDB:   loss < 0.25 AND ssimloss < (1 - ACCEPT_SSIM)  [ssimloss = 1-SSIM]
-#   3DGRUT: psnr > ACCEPT_PSNR AND ssim > ACCEPT_SSIM
-LOSS_THRESHOLD="${LOSS_THRESHOLD:-0.25}"
-SSIMLOSS_THRESHOLD=$(python3 -c "print(1.0 - ${ACCEPT_SSIM})")
+# ── Step 2+: Evaluate → Retry Loop ─────────────────────
 
-evaluate_direct() {
-    local reconstruction_id="$1"
-    local backend="$2"
-
-    local metrics details history
-    metrics=$(curl -sf "${API_URL}/api/v1/reconstructions/${reconstruction_id}/metrics" 2>/dev/null || echo '{}')
-    details=$(curl -sf "${API_URL}/api/v1/reconstructions/${reconstruction_id}" 2>/dev/null || echo '{}')
-    history=$(curl -sf "${API_URL}/api/v1/reconstructions/${reconstruction_id}/iterations" 2>/dev/null || echo '{"iterations":[]}')
-
-    METRICS_JSON="$metrics" DETAILS_JSON="$details" HISTORY_JSON="$history" \
-    BACKEND="$backend" LOSS_T="$LOSS_THRESHOLD" SSIMLOSS_T="$SSIMLOSS_THRESHOLD" \
-    PSNR_T="$ACCEPT_PSNR" SSIM_T="$ACCEPT_SSIM" \
-    python3 << 'EVALEOF'
-import os, json, sys
-
-metrics_raw = json.loads(os.environ.get("METRICS_JSON", "{}"))
-details = json.loads(os.environ.get("DETAILS_JSON", "{}"))
-history = json.loads(os.environ.get("HISTORY_JSON", '{"iterations":[]}'))
-backend = os.environ.get("BACKEND", "")
-loss_t = float(os.environ.get("LOSS_T", "0.25"))
-ssimloss_t = float(os.environ.get("SSIMLOSS_T", "0.15"))
-psnr_t = float(os.environ.get("PSNR_T", "25.0"))
-ssim_t = float(os.environ.get("SSIM_T", "0.85"))
-
-summary = metrics_raw.get("summary", {})
-params = details.get("processing_params", {})
-iterations = history.get("iterations", [])
-
-def fmt(v):
-    return f"{v:.4f}" if isinstance(v, float) else str(v)
-
-if backend == "fvdb":
-    loss = summary.get("reconstruct/loss")
-    ssimloss = summary.get("reconstruct/ssimloss")
-    num_gauss = summary.get("reconstruct/num_gaussians")
-    sh_deg = summary.get("reconstruct/sh_degree")
-
-    cur_epochs = params.get("fvdb_max_epochs", 30)
-    cur_ds = params.get("fvdb_image_downsample_factor", 4)
-    cur_sh = params.get("fvdb_sh_degree")
-
-    if loss is None or ssimloss is None:
-        result = {"verdict": "ACCEPT", "reason": "No metrics available, accepting as-is"}
-        print(json.dumps(result))
-        sys.exit(0)
-
-    ssim_val = 1.0 - ssimloss
-    parts = [f"loss={fmt(loss)} (threshold<{loss_t})",
-             f"ssimloss={fmt(ssimloss)} (SSIM={fmt(ssim_val)}, threshold>{ssim_t})"]
-    if num_gauss: parts.append(f"gaussians={int(num_gauss):,}")
-    if sh_deg is not None: parts.append(f"sh_degree={int(sh_deg)}")
-    metric_str = ", ".join(parts)
-
-    if loss < loss_t and ssimloss < ssimloss_t:
-        result = {"verdict": "ACCEPT",
-                  "reason": f"Quality meets thresholds. {metric_str}"}
-    else:
-        # Suggest parameter improvements
-        new_params = {}
-        reasons = []
-
-        if loss >= loss_t:
-            reasons.append(f"loss={fmt(loss)} exceeds {loss_t}")
-        if ssimloss >= ssimloss_t:
-            reasons.append(f"SSIM={fmt(ssim_val)} below {ssim_t}")
-
-        # Heuristic: increase epochs first, then reduce downsample
-        prev_epochs = [it.get("params", {}).get("fvdb_max_epochs") for it in iterations if it.get("params", {}).get("fvdb_max_epochs")]
-        if cur_epochs < 60:
-            new_params["fvdb_max_epochs"] = min(cur_epochs * 2, 90)
-            reasons.append(f"increasing epochs from {cur_epochs} to {new_params['fvdb_max_epochs']}")
-        elif cur_ds and cur_ds > 2:
-            new_params["fvdb_image_downsample_factor"] = max(cur_ds // 2, 1)
-            reasons.append(f"reducing downsample from {cur_ds} to {new_params['fvdb_image_downsample_factor']}")
-        else:
-            # Already at high epochs and low downsample — try more epochs
-            new_params["fvdb_max_epochs"] = min(cur_epochs + 30, 120)
-            reasons.append(f"increasing epochs to {new_params['fvdb_max_epochs']}")
-
-        result = {"verdict": "ITERATE",
-                  "reason": f"{metric_str}. {'; '.join(reasons)}",
-                  "params": new_params}
-
-elif backend == "3dgrut":
-    psnr = summary.get("psnr") or summary.get("test/psnr")
-    ssim = summary.get("ssim") or summary.get("test/ssim")
-
-    cur_iters = params.get("grut_n_iterations", 5000)
-    cur_ds = params.get("grut_downsample_factor", 4)
-
-    if psnr is None and ssim is None:
-        result = {"verdict": "ACCEPT", "reason": "No metrics available, accepting as-is"}
-        print(json.dumps(result))
-        sys.exit(0)
-
-    parts = []
-    if psnr is not None: parts.append(f"psnr={fmt(psnr)} (threshold>{psnr_t})")
-    if ssim is not None: parts.append(f"ssim={fmt(ssim)} (threshold>{ssim_t})")
-    metric_str = ", ".join(parts) if parts else "no metrics"
-
-    psnr_ok = psnr is not None and psnr > psnr_t
-    ssim_ok = ssim is not None and ssim > ssim_t
-
-    if psnr_ok and ssim_ok:
-        result = {"verdict": "ACCEPT", "reason": f"Quality meets thresholds. {metric_str}"}
-    elif psnr is None and ssim is None:
-        result = {"verdict": "ACCEPT", "reason": "No quality metrics to evaluate"}
-    else:
-        new_params = {}
-        reasons = []
-
-        if psnr is not None and not psnr_ok:
-            reasons.append(f"psnr={fmt(psnr)} below {psnr_t}")
-        if ssim is not None and not ssim_ok:
-            reasons.append(f"ssim={fmt(ssim)} below {ssim_t}")
-
-        if cur_iters < 20000:
-            new_params["grut_n_iterations"] = min(cur_iters * 2, 30000)
-            reasons.append(f"increasing iterations from {cur_iters} to {new_params['grut_n_iterations']}")
-        elif cur_ds and cur_ds > 2:
-            new_params["grut_downsample_factor"] = max(cur_ds // 2, 1)
-            reasons.append(f"reducing downsample from {cur_ds} to {new_params['grut_downsample_factor']}")
-        else:
-            new_params["grut_n_iterations"] = min(cur_iters + 5000, 50000)
-            reasons.append(f"increasing iterations to {new_params['grut_n_iterations']}")
-
-        result = {"verdict": "ITERATE",
-                  "reason": f"{metric_str}. {'; '.join(reasons)}",
-                  "params": new_params}
-else:
-    result = {"verdict": "ACCEPT", "reason": f"Unknown backend '{backend}', accepting as-is"}
-
-print(json.dumps(result))
-EVALEOF
-}
-
-# Iterative evaluation loop
 for ((i=1; i<=MAX_ITERATIONS; i++)); do
     echo ""
     echo "============================================"
     echo " Evaluation $i / $MAX_ITERATIONS"
     echo "============================================"
-
-    echo "[orchestrator] Evaluating reconstruction metrics..."
     echo ""
 
-    update_workflow "{\"current_agent\":\"evaluator\",\"current_step\":\"analyzing metrics\",\"iteration\":${i}}"
+    update_workflow "{\"current_step\":\"evaluating metrics\",\"iteration\":${i},\"current_agent\":\"evaluator\"}"
 
-    EVAL_OUTPUT=$(evaluate_direct "$RECONSTRUCTION_ID" "$CURRENT_BACKEND" 2>&1)
+    echo "[orchestrator] Launching evaluator agent in sandbox..."
+    EVAL_OUTPUT=$(run_evaluator_agent "$RECONSTRUCTION_ID" "$CURRENT_BACKEND" "$i")
+    echo "[orchestrator] Evaluator agent output:"
     echo "$EVAL_OUTPUT"
-
-    VERDICT=$(echo "$EVAL_OUTPUT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('verdict','UNKNOWN'))" 2>/dev/null || echo "UNKNOWN")
-    REASON=$(echo "$EVAL_OUTPUT" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('reason',''))" 2>/dev/null || echo "")
-
     echo ""
-    echo "[orchestrator] Verdict: ${VERDICT}"
-    echo "[orchestrator] Reason: ${REASON}"
 
-    # Save evaluator notes to the reconstruction
+    VERDICT=$(echo "$EVAL_OUTPUT" | extract_verdict)
+    REASON=$(echo "$EVAL_OUTPUT" | extract_reason)
+
+    echo "[orchestrator] Verdict: $VERDICT"
+    echo "[orchestrator] Reason: $REASON"
+
+    # Save evaluator notes
     save_notes "$RECONSTRUCTION_ID" "[Eval $i] Verdict: ${VERDICT}. ${REASON}"
     update_workflow "{\"last_verdict\":\"${VERDICT}\",\"last_reason\":$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "${REASON}" 2>/dev/null || echo '""')}"
 
-    # Record the verdict on the latest iteration record
-    ITER_COUNT=$(curl -sf "${API_URL}/api/v1/reconstructions/${RECONSTRUCTION_ID}/iterations" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('iterations',[])))" 2>/dev/null || echo "0")
+    # Record verdict on the latest iteration
+    ITER_COUNT=$(curl -sf "${API_URL}/api/v1/reconstructions/${RECONSTRUCTION_ID}/iterations" 2>/dev/null \
+        | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('iterations',[])))" 2>/dev/null || echo "0")
     if [[ "$ITER_COUNT" -gt 0 ]]; then
         VERDICT_JSON=$(python3 -c "import json,sys; print(json.dumps({'verdict':sys.argv[1],'reason':sys.argv[2]}))" "$VERDICT" "$REASON" 2>/dev/null || echo '{}')
         curl -sf -X PATCH "${API_URL}/api/v1/reconstructions/${RECONSTRUCTION_ID}/iterations/${ITER_COUNT}/verdict" \
             -H "Content-Type: application/json" -d "$VERDICT_JSON" >/dev/null 2>&1 || true
     fi
 
+    # ACCEPT → done
     if [[ "$VERDICT" == "ACCEPT" ]]; then
-        echo "[orchestrator] Evaluator accepted the reconstruction. Done!"
-        update_workflow '{"status":"completed","current_agent":null,"current_step":"accepted"}'
+        echo "[orchestrator] Reconstruction accepted!"
+        update_workflow '{"status":"completed","current_step":"accepted"}'
         break
     fi
 
+    # Unknown verdict → stop
     if [[ "$VERDICT" != "ITERATE" ]]; then
-        echo "[orchestrator] Could not parse evaluator verdict. Stopping."
-        update_workflow '{"status":"completed","current_agent":null,"current_step":"unknown verdict - stopped"}'
+        echo "[orchestrator] Unknown verdict ($VERDICT). Stopping."
+        update_workflow '{"status":"completed","current_step":"unknown verdict - stopped"}'
         break
     fi
 
+    # Max iterations → stop
     if [[ $i -eq $MAX_ITERATIONS ]]; then
         echo "[orchestrator] Max iterations reached. Using last result."
-        update_workflow '{"status":"completed","current_agent":null,"current_step":"max iterations reached"}'
+        update_workflow '{"status":"completed","current_step":"max iterations reached"}'
         break
     fi
 
-    # Extract suggested parameters directly from evaluate_direct JSON
-    NEW_PARAMS=$(echo "$EVAL_OUTPUT" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(json.dumps(d.get('params',{})))" 2>/dev/null || echo "{}")
-    echo "[orchestrator] Suggested params: $NEW_PARAMS"
+    # Extract suggested params
+    NEW_PARAMS=$(echo "$EVAL_OUTPUT" | extract_params "$CURRENT_BACKEND")
+    echo "[orchestrator] LLM suggested params: $NEW_PARAMS"
 
-    # Track backend switches across iterations
-    SWITCHED_BACKEND=$(echo "$NEW_PARAMS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('reconstruction_backend',''))" 2>/dev/null || true)
+    # Fallback to default escalation
+    if [[ "$NEW_PARAMS" == "{}" || -z "$NEW_PARAMS" ]]; then
+        echo "[orchestrator] No params from LLM — using default escalation"
+        NEW_PARAMS=$(default_escalation "$RECONSTRUCTION_ID")
+        echo "[orchestrator] Default escalation: $NEW_PARAMS"
+    fi
+
+    # Track backend switches
+    SWITCHED_BACKEND=$(echo "$NEW_PARAMS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('reconstruction_backend',''))" 2>/dev/null || true)
     if [[ -n "$SWITCHED_BACKEND" ]]; then
-        echo "[orchestrator] Backend switching: $CURRENT_BACKEND -> $SWITCHED_BACKEND"
+        echo "[orchestrator] Backend switch: $CURRENT_BACKEND → $SWITCHED_BACKEND"
         CURRENT_BACKEND="$SWITCHED_BACKEND"
     fi
 
-    # Save suggested params as notes
-    save_notes "$RECONSTRUCTION_ID" "[Eval $i] Verdict: ${VERDICT}. Suggested params: ${NEW_PARAMS}. ${REASON}"
-
     echo ""
     echo "============================================"
-    echo " Iteration $((i+1)): Retry with new parameters"
+    echo " Retry $((i+1)): New parameters"
     echo "============================================"
+    echo "[orchestrator] Retrying with: $NEW_PARAMS"
 
-    echo "[orchestrator] Retrying reconstruction with new parameters..."
-    echo "[orchestrator] Params: $NEW_PARAMS"
+    update_workflow "{\"current_step\":\"retrying with new params\",\"iteration\":$((i+1))}"
 
-    update_workflow "{\"current_agent\":\"runner\",\"current_step\":\"retrying with new params\",\"iteration\":$((i+1))}"
-
-    RETRY_OUTPUT=$(curl -sf "${API_URL}/api/v1/reconstructions/${RECONSTRUCTION_ID}/retry" \
-        -H "Content-Type: application/json" \
+    # Retry via API
+    RETRY_RESPONSE=$(curl -sf -X POST "${API_URL}/api/v1/reconstructions/${RECONSTRUCTION_ID}/retry" \
+        -H 'Content-Type: application/json' \
         -d "{\"params\": ${NEW_PARAMS}}" 2>&1) || true
-    echo "$RETRY_OUTPUT"
 
-    # Wait for the pipeline to finish
+    RETRY_STATUS=$(echo "$RETRY_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo "unknown")
+    echo "[orchestrator] Retry queued: $RETRY_STATUS"
+
+    if [[ "$RETRY_STATUS" == "unknown" || -z "$RETRY_STATUS" ]]; then
+        echo "[orchestrator] ERROR: Retry failed. Response: $(echo "$RETRY_RESPONSE" | head -c 500)"
+        update_workflow '{"status":"failed","error_message":"Retry API call failed"}'
+        break
+    fi
+
+    # Wait for retry to complete
     JOB_STATUS=$(wait_for_completion "$RECONSTRUCTION_ID" 30 7200 | tail -1 || true)
-    echo ""
-    echo "[orchestrator] Job status after retry: $JOB_STATUS"
+    echo "[orchestrator] Retry result: $JOB_STATUS"
 
     if [[ "$JOB_STATUS" == "failed" ]]; then
-        echo "[orchestrator] Retry failed. Stopping."
+        echo "[orchestrator] Retry failed."
         update_workflow '{"status":"failed","error_message":"Retry reconstruction failed"}'
         break
     fi
-
     if [[ "$JOB_STATUS" == "timeout" ]]; then
-        echo "[orchestrator] Retry timed out waiting for pipeline. Stopping."
-        update_workflow '{"status":"failed","error_message":"Retry pipeline did not complete within timeout"}'
+        echo "[orchestrator] Retry timed out."
+        update_workflow '{"status":"failed","error_message":"Retry timed out"}'
         break
     fi
 done
+
+# ── Final Result ────────────────────────────────────────
 
 echo ""
 echo "============================================"
 echo " Final Result"
 echo "============================================"
 echo ""
-curl -sf "${API_URL}/api/v1/reconstructions/${RECONSTRUCTION_ID}" 2>/dev/null | python3 -m json.tool
+curl -sf "${API_URL}/api/v1/reconstructions/${RECONSTRUCTION_ID}" 2>/dev/null | python3 -m json.tool 2>/dev/null || true
 echo ""
 echo "[orchestrator] Reconstruction ID: $RECONSTRUCTION_ID"
 echo "[orchestrator] Done."

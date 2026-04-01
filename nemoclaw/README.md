@@ -1,96 +1,37 @@
-# NemoClaw — Agentic Orchestrator for NemoReconstruct
+# NemoClaw — Iterative Reconstruction Orchestrator
 
-NemoClaw uses [OpenClaw](https://github.com/nvidia/openclaw) agents running inside isolated [OpenShell](https://github.com/nvidia/openshell) sandboxes to drive 3D reconstruction pipelines. Two agents collaborate through the NemoReconstruct backend API:
+NemoClaw drives iterative 3D reconstruction pipelines with an LLM-powered evaluator agent. The flow:
 
-- **Agent A (Runner)** — uploads video, starts reconstruction, polls for completion
-- **Agent B (Evaluator)** — reads quality metrics (PSNR, SSIM), suggests parameter improvements
+```
+Start Reconstruction → Evaluator Agent (in sandbox) → Retry with Recommended Params → Repeat
+```
 
-The `orchestrate.sh` script drives them in a loop: Runner executes → Evaluator analyzes → Runner retries with new params → repeat until quality thresholds are met or max iterations reached.
+1. **Start** — kicks off a reconstruction via the NemoReconstruct backend API (direct curl call)
+2. **Evaluate** — launches an evaluator agent in an OpenShell sandbox. The agent autonomously fetches metrics from the API, inspects reconstruction output files, and uses a local LLM to decide: ACCEPT or ITERATE
+3. **Retry** — if the agent says ITERATE, applies the suggested parameter changes and re-runs the reconstruction
+4. **Repeat** — loops until quality thresholds are met or max iterations reached
+
+The evaluator agent runs in an isolated OpenShell sandbox with access to:
+- The backend API (fetch metrics, details, iterations via curl)
+- The reconstruction output directory (training logs, PLY files, USDZ outputs)
+- A local LLM via the OpenClaw agent framework
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `orchestrate.sh` | Multi-agent orchestrator — drives the Runner → Evaluator loop |
-| `sandbox-policy.yaml` | OpenShell sandbox policy — controls filesystem, process, and network access |
-| `sandbox-openclaw.json` | OpenClaw config — sets model, workspace, gateway, and tool permissions |
-| `sandbox-policy-template.yaml` | Starter policy — copy and customize for your own project |
-| `sandbox-openclaw-template.json` | Starter OpenClaw config — copy and customize for your own project |
+| `orchestrate.sh` | Main orchestrator — drives the Reconstruct → Evaluate → Retry loop |
+| `agent-b-prompt.md` | Instructions for the evaluator agent — thresholds, output format, tuning rules |
+| `sandbox-policy.yaml` | OpenShell sandbox policy — network and filesystem isolation rules |
+| `sandbox-openclaw-evaluator.json` | OpenClaw config — LLM model, tool permissions, workspace settings |
+| `logs/` | Timestamped logs for each run |
 
-## Sandbox Policy Breakdown
+## Prerequisites
 
-The `sandbox-policy.yaml` defines what an agent can and cannot do inside its sandbox. Here's what each section controls:
-
-### `filesystem_policy`
-
-Controls which host paths are visible inside the sandbox and whether the agent can write to them.
-
-| Field | Value | Meaning |
-|-------|-------|---------|
-| `include_workdir` | `true` | The working directory is accessible inside the sandbox |
-| `read_only` | `/usr`, `/lib`, `/proc`, `/dev/urandom`, `/app`, `/etc`, `/var/log` | Agent can read system binaries and libraries but cannot modify them |
-| `read_write` | `/sandbox`, `/tmp`, `/dev/null` | Agent can write to its workspace and scratch space |
-
-Paths **not** listed here are invisible to the agent — it has no access to `/home`, host project directories, or anything outside this allowlist.
-
-### `landlock`
-
-[Landlock](https://docs.kernel.org/security/landlock.html) is a Linux kernel security module that restricts filesystem access at the kernel level — even if a process tries to escape its sandbox.
-
-| Field | Value | Meaning |
-|-------|-------|---------|
-| `compatibility` | `best_effort` | Use Landlock if the kernel supports it (v5.13+), gracefully fall back if not |
-
-Other options: `strict` (require Landlock or fail) and `disabled`.
-
-### `process`
-
-Controls the user/group identity the agent process runs as inside the sandbox.
-
-| Field | Value | Meaning |
-|-------|-------|---------|
-| `run_as_user` | `sandbox` | Agent runs as the unprivileged `sandbox` user, not root |
-| `run_as_group` | `sandbox` | Same for the group — prevents privilege escalation |
-
-This ensures that even if the agent finds an exploit, it cannot run commands as root inside the container.
-
-### `network_policies`
-
-Defines which network endpoints the agent can reach. **Everything not listed here is blocked** — no internet, no SSH, no arbitrary ports.
-
-Each entry has a name and a list of allowed endpoints plus which binaries can use them:
-
-| Field | Meaning |
-|-------|---------|
-| `name` | Human-readable label for the policy entry |
-| `endpoints[].host` | IP address the agent can connect to (`172.20.0.1` = Docker gateway = host machine) |
-| `endpoints[].port` | Allowed port number |
-| `endpoints[].protocol` | `tcp` or `udp` |
-| `endpoints[].enforcement` | `enforce` = actively block violations; `audit` = log but allow |
-| `endpoints[].access` | `full` = complete read/write access to this endpoint |
-| `binaries[].path` | Only these executables can use this network rule (e.g., `/usr/bin/curl`) |
-
-**Our policy allows exactly two endpoints:**
-
-| Policy Name | Host:Port | Used For |
-|-------------|-----------|----------|
-| `nemo_reconstruct` | `172.20.0.1:8010` | NemoReconstruct backend API — upload, poll, retry, read metrics |
-| `openclaw_gateway` | `172.20.0.1:18789` | OpenClaw gateway — agent harness communication + LLM inference proxy |
-
-The gateway is how agents reach Ollama. Requests to `https://inference.local` inside the sandbox are proxied through the OpenClaw gateway on port 18789, which forwards them to Ollama on the host (port 11434). The agent never talks to Ollama directly.
-
-## OpenClaw Config Breakdown
-
-The `sandbox-openclaw.json` configures the OpenClaw agent harness running inside the sandbox.
-
-| Section | Key Fields | Purpose |
-|---------|-----------|---------|
-| `models.providers.openai` | `baseUrl`, `models[]` | Routes LLM calls to `https://inference.local/v1` (proxied via gateway to Ollama) |
-| `agents.defaults.model` | `primary` | Default model for agents — `openai/glm-4.7-flash` |
-| `agents.defaults.workspace` | — | Working directory inside sandbox — `/sandbox/NemoReconstruct` |
-| `tools.profile` | `coding` | Enables the coding tool profile (file read/write, shell commands) |
-| `tools.deny` | `["web_fetch"]` | Blocks web browsing — agents should only use the backend API |
-| `gateway` | `port`, `mode`, `bind` | Internal gateway on port 18789, local mode, loopback only |
+- **Backend running** at `http://127.0.0.1:8010` (`make backend-dev`)
+- **Ollama** running at `http://127.0.0.1:11434` with a model pulled (e.g., `ollama pull nemotron-3-nano`)
+- **OpenShell** installed with the `openclaw` base image available
+- **OpenShell gateway** with an Ollama provider configured
 
 ## Quick Start
 
@@ -98,11 +39,43 @@ The `sandbox-openclaw.json` configures the OpenClaw agent harness running inside
 # 1. Start the backend
 make backend-dev
 
-# 2. Run the orchestrator with a video
+# 2. Set up OpenShell gateway with Ollama provider (one-time)
+openshell provider create --name ollama --type openai \
+    --credential OPENAI_API_KEY=unused \
+    --config endpoint=http://host.openshell.internal:11434/v1
+
+# 3. Run with a video
 ./nemoclaw/orchestrate.sh ~/videos/scene.MOV "my-scene" 3
 
-# 3. Or run with a pre-loaded dataset
+# 4. Or run with a pre-loaded dataset
 ./nemoclaw/orchestrate.sh --dataset garden "garden-test" 3
 ```
 
-See [docs/NEMOCLAW_SETUP.md](../docs/NEMOCLAW_SETUP.md) for the full step-by-step tutorial.
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama API base URL |
+| `OLLAMA_MODEL` | `nemotron-3-nano` | Model for the evaluator agent |
+| `AGENT_TIMEOUT` | `300` | Evaluator agent timeout (seconds) |
+| `RUN_AGENT_RETRIES` | `2` | Max retries for sandbox agent launch |
+| `ACCEPT_PSNR_THRESHOLD` | `25.0` | PSNR threshold for 3DGRUT |
+| `ACCEPT_SSIM_THRESHOLD` | `0.85` | SSIM threshold for both backends |
+| `INITIAL_BACKEND` | `3dgrut` (video) / `fvdb` (dataset) | Starting reconstruction backend |
+| `INITIAL_GRUT_ITERS` | `5000` | Initial 3DGRUT iterations |
+| `INITIAL_FVDB_EPOCHS` | `30` | Initial fVDB epochs |
+| `API_URL` | `http://127.0.0.1:8010` | Backend API URL |
+
+## How Evaluation Works
+
+After each reconstruction completes, the orchestrator:
+1. Creates a staging directory with the OpenClaw config, sandbox policy, agent instructions, and task message
+2. Launches an OpenShell sandbox (`--from openclaw`) with the staging dir and reconstruction output files mounted
+3. Inside the sandbox, the OpenClaw agent:
+   - Fetches reconstruction details, metrics, and iteration history from the backend API via curl
+   - Explores the mounted output files (training logs, PLY files, etc.)
+   - Analyzes quality against thresholds using the local LLM
+   - Returns a JSON verdict: `ACCEPT` or `ITERATE` (with suggested parameter changes)
+4. The orchestrator parses the verdict. If ITERATE with no params, a default escalation strategy kicks in (double epochs/iterations, then reduce downsample factor)
+
+See [docs/NEMOCLAW_SETUP.md](../docs/NEMOCLAW_SETUP.md) for the full setup tutorial.

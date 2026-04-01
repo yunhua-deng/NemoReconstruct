@@ -124,9 +124,10 @@ data/             Downloaded dataset scenes (git-ignored)
 | File | Purpose |
 |------|---------|
 | `nemoclaw/sandbox-policy.yaml` | OpenShell sandbox policy — network + filesystem rules for both agents |
-| `nemoclaw/sandbox-openclaw.json` | OpenClaw config — model, workspace, tool permissions |
-| `nemoclaw/runner_prompt.md` | Agent A (Runner) system prompt — executes pipelines |
-| `nemoclaw/evaluator_prompt.md` | Agent B (Evaluator) system prompt — analyzes metrics |
+| `nemoclaw/sandbox-openclaw-agent-a.json` | OpenClaw config for Agent A (Runner) — model, workspace, tool permissions |
+| `nemoclaw/sandbox-openclaw-agent-b.json` | OpenClaw config for Agent B (Evaluator) — model, workspace, tool permissions |
+| `nemoclaw/agent-a-prompt.md` | Agent A (Runner) system prompt — executes pipelines |
+| `nemoclaw/agent-b-prompt.md` | Agent B (Evaluator) system prompt — analyzes metrics |
 | `nemoclaw/orchestrate.sh` | Multi-agent orchestrator — Agent A → Agent B loop |
 | `nemoclaw/single_agent_prompt.md` | Standalone agent prompt — for ad-hoc single-agent use |
 | `nemoclaw/example_session.py` | Python SDK script to test the pipeline without an agent |
