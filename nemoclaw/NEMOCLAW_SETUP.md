@@ -11,20 +11,20 @@ This guide walks you through every command from a fresh machine. By the end, you
 ## What You're Building
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Your Machine (DGX Spark, Linux workstation, etc.)              │
+┌──────────────────────────────────────────────────────────────────┐
+│  Your Machine (DGX Spark, Linux workstation, etc.)               │
 │                                                                  │
 │  ┌──────────────────────── OpenShell Sandbox ──────────────────┐ │
-│  │                                                              │ │
+│  │                                                             │ │
 │  │  OpenClaw Agent ──► inference.local ──► Gateway ──► Ollama  │ │
 │  │       │                                           :11434    │ │
-│  │       │ curl / SDK                                           │ │
-│  │       ▼                                                      │ │
+│  │       │ curl / SDK                                          │ │
+│  │       ▼                                                     │ │
 │  │  Your API / Service (:PORT)                                 │ │
-│  │                                                              │ │
-│  └──────────────────────────────────────────────────────────────┘ │
+│  │                                                             │ │
+│  └─────────────────────────────────────────────────────────────┘ │
 │                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 **Key pieces:**
@@ -686,11 +686,9 @@ Both sandboxes need the host service endpoint in their respective policies. One 
 | File | Purpose |
 |------|---------|
 | `nemoclaw/sandbox-policy.yaml` | OpenShell sandbox policy — allows backend (:8010) and OpenClaw gateway (:18789) |
-| `nemoclaw/sandbox-openclaw-evaluator.json` | OpenClaw config for the evaluator agent — model → `nemotron-3-nano` |
+| `nemoclaw/sandbox-openclaw.json` | OpenClaw config for the evaluator agent — model → `nemotron-3-nano` |
 | `nemoclaw/agent-prompt.md` | Evaluator agent system prompt — analyzes metrics, suggests parameter changes |
 | `nemoclaw/orchestrate.sh` | Orchestrator — drives the reconstruct → evaluate → retry loop |
-| `nemoclaw/sandbox-policy-template.yaml` | Generic sandbox policy — copy and customize for your own project (Part 2) |
-| `nemoclaw/sandbox-openclaw-template.json` | Generic OpenClaw config — copy and customize for your own project (Part 2) |
 
 ---
 
