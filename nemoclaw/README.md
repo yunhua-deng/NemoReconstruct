@@ -21,7 +21,7 @@ The evaluator agent runs in an isolated OpenShell sandbox with access to:
 | File | Purpose |
 |------|---------|
 | `orchestrate.sh` | Main orchestrator — drives the Reconstruct → Evaluate → Retry loop |
-| `agent-b-prompt.md` | Instructions for the evaluator agent — thresholds, output format, tuning rules |
+| `agent-prompt.md` | Instructions for the evaluator agent — thresholds, output format, tuning rules |
 | `sandbox-policy.yaml` | OpenShell sandbox policy — network and filesystem isolation rules |
 | `sandbox-openclaw-evaluator.json` | OpenClaw config — LLM model, tool permissions, workspace settings |
 | `logs/` | Timestamped logs for each run |

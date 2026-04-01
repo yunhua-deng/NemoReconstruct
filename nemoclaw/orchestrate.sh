@@ -25,7 +25,7 @@ WORKFLOW_ID="${WORKFLOW_ID:-}"
 OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
 OLLAMA_MODEL="${OLLAMA_MODEL:-nemotron-3-nano}"
 AGENT_TIMEOUT="${AGENT_TIMEOUT:-300}"
-RUN_AGENT_RETRIES="${RUN_AGENT_RETRIES:-2}"
+RUN_AGENT_RETRIES="${RUN_AGENT_RETRIES:-10}"
 
 # Parse arguments
 DATASET_MODE=false
@@ -201,7 +201,7 @@ CONFEOF
 
     # Copy policy and instructions
     cp "$SCRIPT_DIR/sandbox-policy.yaml" "$stage_dir/policy.yaml"
-    cp "$SCRIPT_DIR/agent-b-prompt.md" "$stage_dir/instructions.md"
+    cp "$SCRIPT_DIR/agent-prompt.md" "$stage_dir/instructions.md"
 
     # Compute thresholds
     local ssimloss_threshold
@@ -229,6 +229,10 @@ MSGEOF
     cat > "$stage_dir/run.sh" << 'RUNEOF'
 #!/bin/bash
 set -e
+
+# Timing breadcrumbs visible in captured output
+echo "[sandbox] boot_start=$(date +%s.%N)" >&2
+
 mkdir -p /sandbox/.openclaw
 cp /sandbox/stage/openclaw.json /sandbox/.openclaw/openclaw.json
 export OPENAI_API_KEY=unused
@@ -249,16 +253,21 @@ MESSAGE="${INSTRUCTIONS}
 
 ${TASK}"
 
+echo "[sandbox] openclaw_start=$(date +%s.%N)" >&2
+
 openclaw agent --local --session-id evaluator \
     --message "$MESSAGE" \
     --json \
     --timeout "${1:-300}"
+
+echo "[sandbox] openclaw_end=$(date +%s.%N)" >&2
 RUNEOF
     chmod +x "$stage_dir/run.sh"
 
     # Build the openshell command
     local sb_cmd="openshell sandbox create"
     sb_cmd+=" --from openclaw"
+    sb_cmd+=" --tty"
     sb_cmd+=" --no-keep"
     sb_cmd+=" --no-git-ignore"
     sb_cmd+=" --policy ${stage_dir}/policy.yaml"
@@ -267,22 +276,61 @@ RUNEOF
 
     echo "[orchestrator] Staging evaluator sandbox (timeout=${AGENT_TIMEOUT}s)..." >&2
 
-    # Run agent in sandbox with PTY (required by OpenClaw)
+    # Run agent in sandbox (--tty forces PTY allocation, required by OpenClaw)
     local output=""
     local attempt=0
+    local sb_output_file
+    sb_output_file=$(mktemp)
     while (( attempt < RUN_AGENT_RETRIES )); do
         (( attempt++ ))
-        echo "[orchestrator] Evaluator agent attempt ${attempt}/${RUN_AGENT_RETRIES}..." >&2
+        local t_start t_end t_elapsed
+        t_start=$(date +%s)
+        echo "[orchestrator] Evaluator agent attempt ${attempt}/${RUN_AGENT_RETRIES} started at $(date +%H:%M:%S)..." >&2
 
-        output=$( timeout $((AGENT_TIMEOUT + 120)) \
-            setsid script -qefc "$sb_cmd" /dev/null 2>&1 \
-            | tr -d '\r' ) || true
+        timeout $((AGENT_TIMEOUT + 120)) \
+            $sb_cmd \
+            > "$sb_output_file" 2>&1 || true
+
+        # Strip carriage returns from PTY output
+        sed -i 's/\r//g' "$sb_output_file" 2>/dev/null || true
+
+        t_end=$(date +%s)
+        t_elapsed=$(( t_end - t_start ))
+
+        output=$(<"$sb_output_file")
+        local output_len=${#output}
+
+        echo "[orchestrator] Sandbox attempt ${attempt} finished in ${t_elapsed}s (${output_len} bytes)" >&2
+
+        # Extract sandbox timing breadcrumbs if present
+        local boot_start openclaw_start openclaw_end
+        boot_start=$(grep -oP '\[sandbox\] boot_start=\K[0-9.]+' "$sb_output_file" 2>/dev/null | head -1 || true)
+        openclaw_start=$(grep -oP '\[sandbox\] openclaw_start=\K[0-9.]+' "$sb_output_file" 2>/dev/null | head -1 || true)
+        openclaw_end=$(grep -oP '\[sandbox\] openclaw_end=\K[0-9.]+' "$sb_output_file" 2>/dev/null | head -1 || true)
+        if [[ -n "$boot_start" ]]; then
+            echo "[orchestrator]   sandbox timing: boot_start=$boot_start openclaw_start=${openclaw_start:-never} openclaw_end=${openclaw_end:-never}" >&2
+            if [[ -n "$boot_start" && -n "$openclaw_start" ]]; then
+                local setup_secs
+                setup_secs=$(python3 -c "print(f'{float(${openclaw_start}) - float(${boot_start}):.1f}')" 2>/dev/null || echo "?")
+                echo "[orchestrator]   sandbox boot→openclaw: ${setup_secs}s" >&2
+            fi
+            if [[ -n "$openclaw_start" && -n "$openclaw_end" ]]; then
+                local agent_secs
+                agent_secs=$(python3 -c "print(f'{float(${openclaw_end}) - float(${openclaw_start}):.1f}')" 2>/dev/null || echo "?")
+                echo "[orchestrator]   openclaw agent duration: ${agent_secs}s" >&2
+            fi
+        else
+            echo "[orchestrator]   (no sandbox timing breadcrumbs — run.sh may not have started)" >&2
+        fi
 
         # Check if we got meaningful output
-        local output_len=${#output}
         if (( output_len < 100 )); then
-            echo "[orchestrator] Agent output too short (${output_len} bytes), retrying..." >&2
-            sleep 5
+            echo "[orchestrator] Agent output too short (${output_len} bytes)" >&2
+            if (( output_len > 0 )); then
+                echo "[orchestrator]   output preview: $(head -5 "$sb_output_file" | head -c 500)" >&2
+            fi
+            echo "[orchestrator]   retrying in 60s..." >&2
+            sleep 60
             continue
         fi
 
@@ -296,6 +344,7 @@ RUNEOF
         echo "[orchestrator] Agent produced ${output_len} bytes of output" >&2
         break
     done
+    rm -f "$sb_output_file"
 
     # Cleanup staging directory
     rm -rf "$stage_dir"
