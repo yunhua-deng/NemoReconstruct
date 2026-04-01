@@ -233,7 +233,7 @@ If you see Cloudflare HTML, `"Incorrect API key"` errors, or connection refused 
 
 ---
 
-# Part 2 — Connect Your Project
+# Option A. Connect Your Project
 
 The setup above works for **any** repo or API. Here's how to connect your project.
 
@@ -489,7 +489,7 @@ Type `exit` to leave the sandbox.
 
 ---
 
-# Part 3 — Full Example: NemoReconstruct
+# Part 2 — Full Example: NemoReconstruct
 
 This section walks through a concrete example using the NemoReconstruct 3D reconstruction API.
 
@@ -526,6 +526,11 @@ Verify:
 ```bash
 curl -s http://localhost:8010/health
 # {"status":"ok","service":"NemoReconstruct"}
+```
+
+Monitor:
+```bash
+fuser -k 8010/tcp && make backend-dev
 ```
 
 ### Start the frontend
